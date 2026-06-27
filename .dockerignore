@@ -1,0 +1,16 @@
+# Never bake secrets into the image — supply them at runtime via docker-compose env_file.
+.env
+
+# Python byte-code and virtual environments are not needed in the image.
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Build artefacts.
+dist/
+build/
+*.egg-info/
+
+# Editor and OS noise.
+.DS_Store
