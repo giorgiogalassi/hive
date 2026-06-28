@@ -26,6 +26,7 @@ _AGENTS_DIR = os.path.join(os.path.dirname(__file__), "..", "agents")
 # Map each trigger label to the agent YAML filename.
 _LABEL_TO_AGENT: dict[str, str] = {
     "agent:review": "issue-reviewer.yaml",
+    "agent:develop": "issue-developer.yaml",
 }
 
 app = FastAPI()
