@@ -42,6 +42,7 @@ _AGENTS_DIR = os.path.join(os.path.dirname(__file__), "..", "agents")
 # To add a new agent, insert its label and corresponding YAML filename here.
 _LABEL_TO_AGENT: dict[str, str] = {
     "agent:review": "issue-reviewer.yaml",
+    "agent:develop": "issue-developer.yaml",
 }
 
 app = FastAPI()

@@ -57,16 +57,19 @@ def run(yaml_path: str, context: dict) -> None:
 
         # Dispatch to the runner specified in the agent YAML. Each runner wraps a
         # different AI CLI tool with its own prompt-formatting conventions.
+        timeout = config.get("timeout", 900)
+
         if runner_type == "claude-code":
-            _invoke_claude_cli(system_prompt, model_cfg, context, workdir, agent_name)
+            _invoke_claude_cli(system_prompt, model_cfg, context, workdir, agent_name, timeout)
         elif runner_type == "codex":
-            _invoke_codex_cli(system_prompt, model_cfg, context, workdir, agent_name)
+            _invoke_codex_cli(system_prompt, model_cfg, context, workdir, agent_name, timeout)
         else:
             raise ValueError(f"Unknown runner: {runner_type}")
 
         logger.info("[%s] run complete", agent_name)
     except Exception:
         logger.exception("[%s] run failed", agent_name)
+        _post_failure_comment(context, agent_name)
     finally:
         # Always remove the temporary workspace to avoid disk accumulation,
         # even if the agent raised an exception during execution.
@@ -107,6 +110,7 @@ def _invoke_claude_cli(
     context: dict,
     workdir: str,
     agent_name: str,
+    timeout: int = 900,
 ) -> None:
     """Invoke the Claude Code CLI inside *workdir* with the given system prompt.
 
@@ -126,13 +130,15 @@ def _invoke_claude_cli(
     model_name = model_cfg.get("name", "claude-sonnet-4-6")
     user_message = _build_user_message(context)
 
+    max_turns = model_cfg.get("max_turns", 40)
     cmd = [
         "claude",
         "--print",
         "--dangerously-skip-permissions",
         "--model", model_name,
+        "--max-turns", str(max_turns),
         "--system-prompt", system_prompt,
-        "-p", "-",  # read prompt from stdin to avoid arg-length/escaping issues
+        "-p", "-",
     ]
 
     # Inject the GitHub token so the agent can authenticate API calls and git
@@ -150,7 +156,7 @@ def _invoke_claude_cli(
             stdout=log_file,
             stderr=log_file,
             env=env,
-            timeout=300,
+            timeout=timeout,
             text=True,
         )
 
@@ -172,6 +178,7 @@ def _invoke_codex_cli(
     context: dict,
     workdir: str,
     agent_name: str,
+    timeout: int = 900,
 ) -> None:
     """Invoke the OpenAI Codex CLI inside *workdir* with the given system prompt.
 
@@ -213,7 +220,7 @@ def _invoke_codex_cli(
             stdout=log_file,
             stderr=log_file,
             env=env,
-            timeout=300,
+            timeout=timeout,
             text=True,
         )
 
@@ -225,6 +232,32 @@ def _invoke_codex_cli(
         logger.error("%s exited with code %d", prefix, result.returncode)
     else:
         logger.info("%s exited cleanly", prefix)
+
+
+def _post_failure_comment(context: dict, agent_name: str) -> None:
+    token = context.get("github_token", "")
+    repo = context.get("repo_full_name", "")
+    issue = context.get("issue_number")
+    if not (token and repo and issue):
+        return
+    body = (
+        f"**Hive agent `{agent_name}` encountered an error.**\n\n"
+        "The run failed before completing. Check the container logs for details."
+    )
+    try:
+        subprocess.run(
+            [
+                "curl", "-s", "-X", "POST",
+                "-H", f"Authorization: token {token}",
+                "-H", "Accept: application/vnd.github.v3+json",
+                f"https://api.github.com/repos/{repo}/issues/{issue}/comments",
+                "-d", f'{{"body": {__import__("json").dumps(body)}}}',
+            ],
+            timeout=15,
+            check=False,
+        )
+    except Exception:
+        logger.warning("[%s] could not post failure comment", agent_name)
 
 
 def _build_user_message(context: dict) -> str:
