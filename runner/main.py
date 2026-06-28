@@ -4,13 +4,14 @@ import json
 import logging
 import os
 
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+
+from runner import agent_runner
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Fail fast at startup if the secret is not configured.
 _SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
 if not _SECRET:
     raise RuntimeError(
@@ -20,11 +21,18 @@ if not _SECRET:
 
 _SECRET_BYTES: bytes = _SECRET.encode()
 
+_AGENTS_DIR = os.path.join(os.path.dirname(__file__), "..", "agents")
+
+# Map each trigger label to the agent YAML filename.
+_LABEL_TO_AGENT: dict[str, str] = {
+    "agent:review": "issue-reviewer.yaml",
+}
+
 app = FastAPI()
 
 
 @app.post("/webhook")
-async def webhook(request: Request) -> JSONResponse:
+async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
     body: bytes = await request.body()
 
     signature_header = request.headers.get("X-Hub-Signature-256")
@@ -49,15 +57,31 @@ async def webhook(request: Request) -> JSONResponse:
     event_type: str = request.headers.get("X-GitHub-Event", "unknown")
     action: str | None = payload.get("action")
 
-    logger.info(
-        "event=%s action=%s payload=%s",
-        event_type,
-        action,
-        body.decode(),
-    )
+    logger.info("event=%s action=%s", event_type, action)
 
     if event_type == "ping":
-        logger.info("ping received")
         return JSONResponse(content={"status": "ok"}, status_code=200)
+
+    if event_type == "issues" and action == "labeled":
+        label_name: str = payload.get("label", {}).get("name", "")
+        agent_yaml = _LABEL_TO_AGENT.get(label_name)
+
+        if agent_yaml:
+            issue = payload.get("issue", {})
+            repo = payload.get("repository", {})
+            github_token = os.environ.get("GITHUB_TOKEN", "")
+
+            context = {
+                "repo_full_name": repo.get("full_name", ""),
+                "issue_number": issue.get("number"),
+                "issue_title": issue.get("title", ""),
+                "issue_body": issue.get("body", ""),
+                "label": label_name,
+                "github_token": github_token,
+            }
+
+            yaml_path = os.path.join(_AGENTS_DIR, agent_yaml)
+            logger.info("dispatching label=%s agent=%s issue=#%s", label_name, agent_yaml, context["issue_number"])
+            background_tasks.add_task(agent_runner.run, yaml_path, context)
 
     return JSONResponse(content={"status": "ok"}, status_code=200)

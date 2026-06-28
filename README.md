@@ -17,9 +17,11 @@ Verifies HMAC-SHA256 signature
         ↓
 Loads the matching agent YAML
         ↓
-Agent runs, uses tools (bash, read, write)
+Clones the repo into a temp workdir
         ↓
-Agent posts result back to GitHub
+Invokes the agent runtime (claude --print ...)
+        ↓
+Agent posts result back to GitHub via curl
 ```
 
 ---
@@ -29,18 +31,9 @@ Agent posts result back to GitHub
 ```
 hive/
   agents/                     agent YAML definitions
-  skills/                     Python tool definitions
   runner/
     main.py                   FastAPI app + webhook receiver
-    agent_runner.py           loads YAML, instantiates agent, starts run
-    llm_port.py               LLMPort abstract interface
-    adapters/
-      anthropic_adapter.py
-      openai_adapter.py
-    tools/
-      bash_tool.py
-      read_tool.py
-      write_tool.py
+    agent_runner.py           loads YAML, clones repo, invokes CLI runner
   Dockerfile
   docker-compose.yml
   .env.example
@@ -52,7 +45,7 @@ hive/
 
 - Docker + Docker Compose
 - A GitHub repo with webhook access
-- An Anthropic API key (Phase 2+)
+- Claude Code CLI credentials (`claude setup-token`)
 
 For local tunnel testing:
 - Node.js (for `npx localtunnel`)
@@ -67,29 +60,23 @@ For local tunnel testing:
 cp .env.example .env
 ```
 
-Edit `.env` and set:
+Edit `.env` and fill in:
 
 ```
 GITHUB_WEBHOOK_SECRET=your-secret-here
+GITHUB_TOKEN=your-github-pat
+CLAUDE_CODE_OAUTH_TOKEN=<output of: claude setup-token>
 ```
 
-Use any random string. You will paste the same value into the GitHub webhook settings.
-
-**2. Start the receiver**
+**2. Start the stack**
 
 ```bash
-docker compose up
+docker compose up --build
 ```
 
-The app starts on `http://localhost:8000`. You should see:
-
-```
-INFO:     Uvicorn running on http://0.0.0.0:8000
-```
+The app starts on `http://localhost:8000`.
 
 **3. Expose localhost via localtunnel**
-
-In a second terminal:
 
 ```bash
 npx localtunnel --port 8000
@@ -97,7 +84,7 @@ npx localtunnel --port 8000
 
 This prints a public HTTPS URL (e.g. `https://fast-ears-rest.loca.lt`). Copy it.
 
-> Note: the URL changes every time localtunnel restarts. Update the GitHub webhook URL when that happens. For a stable URL, use a VPS (Phase 4).
+> The URL changes every time localtunnel restarts. Update the GitHub webhook URL when that happens. For a stable URL, use a VPS (Phase 4).
 
 **4. Configure the GitHub webhook**
 
@@ -110,35 +97,35 @@ Go to your repo → Settings → Webhooks → Add webhook:
 | Secret | same value as `GITHUB_WEBHOOK_SECRET` in `.env` |
 | Events | Issues (at minimum) |
 
-**5. Test**
+**5. Trigger an agent**
 
-Add any label to any issue in your repo. You should see the JSON payload appear in `docker compose` logs within a second.
+Apply the label `agent:review` to any issue. The agent will clone the repo, analyze the issue, and post a comment within ~60 seconds.
 
 ---
 
-## Running without Docker
+## Agent YAML format
 
-If you prefer to run directly with Python:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn runner.main:app --reload
+```yaml
+name: issue-reviewer
+runner: claude-code          # claude-code | codex
+model:
+  provider: anthropic
+  name: claude-sonnet-4-6
+triggers:
+  - type: github-label
+    label: "agent:review"
+system_prompt: |
+  You are a senior software engineer...
 ```
 
-The app behaves identically. Docker is used in production for portability, isolation, and the ability to run multiple agents in parallel as separate containers.
+Add new agents by dropping a `.yaml` file in `agents/` and registering the label in `runner/main.py`:
 
----
-
-## Development phases
-
-| Phase | Status | Description |
-|---|---|---|
-| 1 | Done | Webhook receiver — receive, verify, log |
-| 2 | Planned | `issue-reviewer` agent — label triggers analysis comment |
-| 3 | Planned | `issue-developer` agent — label triggers branch + PR |
-| 4 | Planned | `hive` CLI + Hetzner VPS deploy |
+```python
+_LABEL_TO_AGENT: dict[str, str] = {
+    "agent:review": "issue-reviewer.yaml",
+    "agent:develop": "issue-developer.yaml",  # example
+}
+```
 
 ---
 
@@ -147,5 +134,75 @@ The app behaves identically. Docker is used in production for portability, isola
 | Variable | Required | Description |
 |---|---|---|
 | `GITHUB_WEBHOOK_SECRET` | Yes | HMAC secret shared with GitHub webhook |
-| `ANTHROPIC_API_KEY` | Phase 2+ | API key for the Anthropic SDK |
-| `GITHUB_TOKEN` | Phase 2+ | PAT for posting comments and opening PRs |
+| `GITHUB_TOKEN` | Yes | PAT for cloning repos and posting comments |
+| `CLAUDE_CODE_OAUTH_TOKEN` | For `runner: claude-code` | Obtained via `claude setup-token` |
+| `OPENAI_API_KEY` | For `runner: codex` | OpenAI key for Codex runner |
+
+---
+
+## Development phases
+
+| Phase | Status | Description |
+|---|---|---|
+| 1 | Done | Webhook receiver — receive, verify, log |
+| 2 | In progress | `issue-reviewer` agent — label triggers analysis comment |
+| 3 | Planned | `issue-developer` agent — label triggers branch + PR |
+| 4 | Planned | VPS deploy (Hetzner) |
+
+---
+
+## Debugging
+
+**Follow live logs**
+
+```bash
+docker compose logs -f
+```
+
+**Check recent logs (last 50 lines)**
+
+```bash
+docker logs hive-app-1 --tail 50
+```
+
+**Open a shell inside the container**
+
+```bash
+docker exec -it hive-app-1 bash
+```
+
+**Verify claude CLI is authenticated**
+
+```bash
+docker exec hive-app-1 claude --print "say hello in one sentence"
+```
+
+**Run claude manually with a model and system prompt (no TTY)**
+
+```bash
+docker exec hive-app-1 claude --print --model claude-sonnet-4-6 --system-prompt "Be concise." "List files in the current directory"
+```
+
+**Inspect a running container's processes**
+
+```bash
+docker exec hive-app-1 ps aux
+```
+
+**List all running containers**
+
+```bash
+docker ps
+```
+
+**Rebuild and restart cleanly**
+
+```bash
+docker compose down && docker compose up --build
+```
+
+**Rebuild in background**
+
+```bash
+docker compose up --build -d
+```
