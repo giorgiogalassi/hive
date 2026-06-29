@@ -3,12 +3,17 @@ main.py — FastAPI webhook receiver for the Hive GitHub automation system.
 
 Listens for inbound GitHub webhook events, validates their HMAC-SHA256 signature
 to confirm they originate from GitHub, and dispatches the appropriate agent as a
-background task when a matching issue label is applied.
+background task based on the normalized event type returned by the VCS port.
+
+All event parsing and VCS operations are delegated to the GitHubAdapter so that
+no GitHub-specific webhook field names appear outside the adapter.  The one
+exception is the HMAC signature header ``X-Hub-Signature-256``, which must be
+read directly here as part of the security infrastructure before any event
+parsing takes place.
 """
 
 import hashlib
 import hmac
-import json
 import logging
 import os
 
@@ -16,6 +21,15 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from runner import agent_runner
+from runner import loop
+from runner.vcs.github_adapter import GitHubAdapter
+from runner.vcs.port import (
+    IssueCommentEvent,
+    IssueLabeledEvent,
+    PRLabeledEvent,
+    PROpenedEvent,
+    PRReviewSubmittedEvent,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,12 +52,10 @@ _SECRET_BYTES: bytes = _SECRET.encode()
 # regardless of the working directory from which the server is launched.
 _AGENTS_DIR = os.path.join(os.path.dirname(__file__), "..", "agents")
 
-# Map each trigger label to the agent YAML filename.
-# To add a new agent, insert its label and corresponding YAML filename here.
-_LABEL_TO_AGENT: dict[str, str] = {
-    "agent:review": "issue-reviewer.yaml",
-    "agent:develop": "issue-developer.yaml",
-}
+# Single VCS adapter instance shared across all requests.  GitHubAdapter owns
+# all GitHub-specific field names; nothing else in this module may reference
+# provider-specific payload keys.
+_vcs = GitHubAdapter()
 
 app = FastAPI()
 
@@ -53,22 +65,36 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
     """Handle an inbound GitHub webhook POST request.
 
     Performs the following steps in order:
-    1. **Signature validation** — Computes the expected HMAC-SHA256 digest of the
-       raw request body using the shared webhook secret and compares it to the
-       ``X-Hub-Signature-256`` header supplied by GitHub. Requests that are missing
-       the header or whose digest does not match are rejected with HTTP 401.
-    2. **Event routing** — Inspects the ``X-GitHub-Event`` and ``action`` fields to
-       decide what to do:
-       - ``ping`` events are acknowledged immediately (used by GitHub when a
-         webhook is first created or re-delivered).
-       - ``issues`` / ``labeled`` events trigger agent dispatch (see below).
-       - All other event types are silently accepted with ``{"status": "ok"}``.
-    3. **Agent dispatch** — When an issue is labeled, the label name is looked up in
-       ``_LABEL_TO_AGENT``. If a matching YAML config is found, the relevant GitHub
-       context (repo, issue number, title, body, token) is assembled and passed to
-       :func:`agent_runner.run` as a FastAPI background task so the HTTP response
-       is returned immediately without waiting for the (potentially long-running)
-       agent to finish.
+
+    1. **Signature validation** — Computes the expected HMAC-SHA256 digest of
+       the raw request body using the shared webhook secret and compares it to
+       the ``X-Hub-Signature-256`` header supplied by GitHub.  Requests that
+       are missing the header or whose digest does not match are rejected with
+       HTTP 401.
+
+    2. **Event parsing** — Delegates payload interpretation to
+       :meth:`~runner.vcs.github_adapter.GitHubAdapter.parse_event`, which
+       returns a normalized event object or ``None`` for unhandled event types.
+
+    3. **Dispatch** — Switches on the concrete type of the normalized event and
+       schedules the appropriate agent as a FastAPI background task:
+
+       - :class:`~runner.vcs.port.IssueLabeledEvent` with ``agent:analyze``
+         → dispatches ``issue-reviewer.yaml``.
+       - :class:`~runner.vcs.port.IssueLabeledEvent` with ``agent:develop``
+         → dispatches ``cody.yaml``.
+       - :class:`~runner.vcs.port.PROpenedEvent`
+         → idempotently applies the ``agent:review`` label so the resulting
+         :class:`~runner.vcs.port.PRLabeledEvent` fires Reven.
+       - :class:`~runner.vcs.port.PRLabeledEvent` with ``agent:review``
+         → dispatches ``reven.yaml`` via :func:`agent_runner.run_for_pr`.
+       - :class:`~runner.vcs.port.PRReviewSubmittedEvent`
+         → delegates to :func:`loop.on_review_submitted`; re-queues
+         ``cody.yaml`` on ``"requeue"``, logs on ``"approved"`` /
+         ``"human_review"``.
+       - :class:`~runner.vcs.port.IssueCommentEvent` on a PR from the repo
+         owner → delegates to :func:`loop.on_owner_comment`; re-queues
+         ``cody.yaml`` on ``"requeue"``.
 
     Args:
         request: The incoming FastAPI request object containing headers and body.
@@ -84,6 +110,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
     body: bytes = await request.body()
 
     # --- Signature validation ---
+    # The X-Hub-Signature-256 header is read here intentionally: it is security
+    # infrastructure that must run before any event parsing, not a business-logic
+    # payload field.  This is the only GitHub-specific string permitted in main.py.
     signature_header = request.headers.get("X-Hub-Signature-256")
     if not signature_header:
         return PlainTextResponse(
@@ -104,42 +133,276 @@ async def webhook(request: Request, background_tasks: BackgroundTasks) -> JSONRe
             status_code=401,
         )
 
-    # --- Event routing ---
-    payload: dict = json.loads(body)
-    event_type: str = request.headers.get("X-GitHub-Event", "unknown")
-    action: str | None = payload.get("action")
+    # --- Event parsing via VCS port ---
+    # parse_event returns None for ping events and any other unhandled types;
+    # we acknowledge them with 200 without further processing.
+    event = _vcs.parse_event(dict(request.headers), body)
 
-    logger.info("event=%s action=%s", event_type, action)
-
-    # Acknowledge GitHub's connectivity check sent when a webhook is registered.
-    if event_type == "ping":
+    if event is None:
+        logger.info("parse_event returned None — unhandled or ping event, acknowledging")
         return JSONResponse(content={"status": "ok"}, status_code=200)
 
-    # Only ``issues`` events with an ``labeled`` action can trigger an agent.
-    if event_type == "issues" and action == "labeled":
-        label_name: str = payload.get("label", {}).get("name", "")
-        agent_yaml = _LABEL_TO_AGENT.get(label_name)
+    logger.info("event=%s", type(event).__name__)
 
-        if agent_yaml:
-            # Extract the minimal set of GitHub context fields the agent needs
-            # to identify the repository and issue it should work on.
-            issue = payload.get("issue", {})
-            repo = payload.get("repository", {})
-            github_token = os.environ.get("GITHUB_TOKEN", "")
+    github_token = os.environ.get("GITHUB_TOKEN", "")
 
-            context = {
-                "repo_full_name": repo.get("full_name", ""),
-                "issue_number": issue.get("number"),
-                "issue_title": issue.get("title", ""),
-                "issue_body": issue.get("body", ""),
-                "label": label_name,
-                "github_token": github_token,
-            }
+    # --- Dispatch on normalized event type ---
 
-            yaml_path = os.path.join(_AGENTS_DIR, agent_yaml)
-            logger.info("dispatching label=%s agent=%s issue=#%s", label_name, agent_yaml, context["issue_number"])
-            # Schedule the agent as a background task so the webhook response is
-            # returned to GitHub immediately; agents can run for several minutes.
-            background_tasks.add_task(agent_runner.run, yaml_path, context)
+    if isinstance(event, IssueLabeledEvent):
+        _dispatch_issue_labeled(event, github_token, background_tasks)
+
+    elif isinstance(event, PROpenedEvent):
+        _handle_pr_opened(event)
+
+    elif isinstance(event, PRLabeledEvent):
+        _dispatch_pr_labeled(event, github_token, background_tasks)
+
+    elif isinstance(event, PRReviewSubmittedEvent):
+        _handle_review_submitted(event, github_token, background_tasks)
+
+    elif isinstance(event, IssueCommentEvent) and event.is_pr:
+        _handle_owner_pr_comment(event, github_token, background_tasks)
 
     return JSONResponse(content={"status": "ok"}, status_code=200)
+
+
+# ---------------------------------------------------------------------------
+# Private dispatch helpers
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_issue_labeled(
+    event: IssueLabeledEvent,
+    github_token: str,
+    background_tasks: BackgroundTasks,
+) -> None:
+    """Dispatch an agent when a label is applied to an issue.
+
+    Fetches the issue title and body via the VCS port so the agent receives
+    the full context it needs, then schedules the appropriate YAML runner as
+    a background task.
+
+    Args:
+        event: Normalized issue-labeled event.
+        github_token: GitHub personal access token injected into the agent context.
+        background_tasks: FastAPI background task registry.
+    """
+    if event.label not in ("agent:analyze", "agent:develop"):
+        logger.debug("IssueLabeledEvent: unhandled label=%s — ignoring", event.label)
+        return
+
+    # Fetch the issue details so the agent receives useful context.
+    try:
+        issue_details = _vcs.get_issue(event.repo, event.issue_number)
+    except Exception:
+        logger.exception(
+            "IssueLabeledEvent: could not fetch issue details for %s#%d",
+            event.repo, event.issue_number,
+        )
+        issue_details = {"title": "", "body": ""}
+
+    context = {
+        "repo_full_name": event.repo,
+        "issue_number": event.issue_number,
+        "issue_title": issue_details.get("title", ""),
+        "issue_body": issue_details.get("body", ""),
+        "label": event.label,
+        "github_token": github_token,
+    }
+
+    if event.label == "agent:analyze":
+        agent_yaml = "issue-reviewer.yaml"
+    else:
+        # "agent:develop"
+        agent_yaml = "cody.yaml"
+
+    yaml_path = os.path.join(_AGENTS_DIR, agent_yaml)
+    logger.info(
+        "dispatching label=%s agent=%s issue=#%d repo=%s",
+        event.label, agent_yaml, event.issue_number, event.repo,
+    )
+    background_tasks.add_task(agent_runner.run, yaml_path, context)
+
+
+def _handle_pr_opened(event: PROpenedEvent) -> None:
+    """Idempotently apply the ``agent:review`` label when a PR is opened.
+
+    The label application triggers a ``PRLabeledEvent`` webhook, which then
+    fires Reven.  No agent is dispatched directly from this handler.
+
+    Args:
+        event: Normalized PR-opened event.
+    """
+    try:
+        already_labeled = _vcs.has_label(event.repo, event.pr_number, "agent:review")
+    except Exception:
+        logger.exception(
+            "PROpenedEvent: could not check labels for %s#%d",
+            event.repo, event.pr_number,
+        )
+        return
+
+    if not already_labeled:
+        try:
+            _vcs.apply_label(event.repo, event.pr_number, "agent:review")
+            logger.info(
+                "PROpenedEvent: applied agent:review to pr=#%d repo=%s",
+                event.pr_number, event.repo,
+            )
+        except Exception:
+            logger.exception(
+                "PROpenedEvent: could not apply agent:review to %s#%d",
+                event.repo, event.pr_number,
+            )
+    else:
+        logger.debug(
+            "PROpenedEvent: agent:review already present on pr=#%d repo=%s",
+            event.pr_number, event.repo,
+        )
+
+
+def _dispatch_pr_labeled(
+    event: PRLabeledEvent,
+    github_token: str,
+    background_tasks: BackgroundTasks,
+) -> None:
+    """Dispatch Reven when the ``agent:review`` label is applied to a PR.
+
+    Fetches PR metadata (title, body) via the VCS port and builds the full
+    PR context required by :func:`agent_runner.run_for_pr`.  Head and base
+    branches are left empty because GitHub's issues API endpoint does not
+    return branch information for pull requests.
+
+    Args:
+        event: Normalized PR-labeled event.
+        github_token: GitHub personal access token injected into the agent context.
+        background_tasks: FastAPI background task registry.
+    """
+    if event.label != "agent:review":
+        logger.debug("PRLabeledEvent: unhandled label=%s — ignoring", event.label)
+        return
+
+    # Use the issues endpoint (works for PR numbers too) to retrieve title/body.
+    try:
+        pr_details = _vcs.get_issue(event.repo, event.pr_number)
+    except Exception:
+        logger.exception(
+            "PRLabeledEvent: could not fetch PR details for %s#%d",
+            event.repo, event.pr_number,
+        )
+        pr_details = {"title": "", "body": ""}
+
+    pr_context = {
+        "repo_full_name": event.repo,
+        "pr_number": event.pr_number,
+        "pr_title": pr_details.get("title", ""),
+        "pr_body": pr_details.get("body", ""),
+        "head_branch": "",
+        "base_branch": "",
+        "review_body": "",
+        "github_token": github_token,
+    }
+
+    yaml_path = os.path.join(_AGENTS_DIR, "reven.yaml")
+    logger.info(
+        "dispatching label=%s agent=reven.yaml pr=#%d repo=%s",
+        event.label, event.pr_number, event.repo,
+    )
+    background_tasks.add_task(agent_runner.run_for_pr, yaml_path, pr_context, _vcs)
+
+
+def _handle_review_submitted(
+    event: PRReviewSubmittedEvent,
+    github_token: str,
+    background_tasks: BackgroundTasks,
+) -> None:
+    """Act on the outcome of a PR review submission.
+
+    Delegates the loop decision to :func:`loop.on_review_submitted` and
+    re-queues Cody when the result is ``"requeue"``.
+
+    Args:
+        event: Normalized PR-review-submitted event.
+        github_token: GitHub personal access token injected into the agent context.
+        background_tasks: FastAPI background task registry.
+    """
+    result = loop.on_review_submitted(_vcs, event)
+
+    if result == "requeue":
+        pr_context = {
+            "repo_full_name": event.repo,
+            "pr_number": event.pr_number,
+            "pr_title": "",
+            "pr_body": "",
+            "head_branch": "",
+            "base_branch": "",
+            "review_body": event.body,
+            "github_token": github_token,
+        }
+        yaml_path = os.path.join(_AGENTS_DIR, "cody.yaml")
+        logger.info(
+            "PRReviewSubmittedEvent: requeuing cody.yaml for pr=#%d repo=%s",
+            event.pr_number, event.repo,
+        )
+        background_tasks.add_task(agent_runner.run_for_pr, yaml_path, pr_context, _vcs)
+
+    elif result == "approved":
+        logger.info(
+            "PRReviewSubmittedEvent: pr=#%d approved — no action required",
+            event.pr_number,
+        )
+
+    elif result == "human_review":
+        logger.info(
+            "PRReviewSubmittedEvent: pr=#%d escalated to human review — label already applied",
+            event.pr_number,
+        )
+
+
+def _handle_owner_pr_comment(
+    event: IssueCommentEvent,
+    github_token: str,
+    background_tasks: BackgroundTasks,
+) -> None:
+    """Re-queue Cody when the repo owner comments on a PR.
+
+    Checks :func:`loop.is_repo_owner` to confirm the commenter is the owner
+    configured via ``GITHUB_OWNER``, then delegates to
+    :func:`loop.on_owner_comment` for the loop-state decision.
+
+    Args:
+        event: Normalized issue-comment event where ``is_pr`` is ``True``.
+        github_token: GitHub personal access token injected into the agent context.
+        background_tasks: FastAPI background task registry.
+    """
+    if not loop.is_repo_owner(event.author):
+        logger.debug(
+            "IssueCommentEvent: author=%s is not repo owner — ignoring",
+            event.author,
+        )
+        return
+
+    result = loop.on_owner_comment(event)
+
+    if result == "requeue":
+        pr_context = {
+            "repo_full_name": event.repo,
+            "pr_number": event.number,
+            "pr_title": "",
+            "pr_body": "",
+            "head_branch": "",
+            "base_branch": "",
+            "review_body": event.body,
+            "github_token": github_token,
+        }
+        yaml_path = os.path.join(_AGENTS_DIR, "cody.yaml")
+        logger.info(
+            "IssueCommentEvent: owner requeue cody.yaml for pr=#%d repo=%s",
+            event.number, event.repo,
+        )
+        background_tasks.add_task(agent_runner.run_for_pr, yaml_path, pr_context, _vcs)
+    else:
+        logger.debug(
+            "IssueCommentEvent: owner comment on pr=#%d — loop returned ignore",
+            event.number,
+        )
