@@ -6,6 +6,7 @@ repository into a temporary workspace, invoking the appropriate AI CLI runner
 (Claude Code or OpenAI Codex), and cleaning up after execution completes.
 """
 
+import json
 import logging
 import os
 import shutil
@@ -13,6 +14,8 @@ import subprocess
 import tempfile
 
 import yaml
+
+from runner.vcs.port import VCSPort
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +80,93 @@ def run(yaml_path: str, context: dict) -> None:
         logger.info("[%s] workdir cleaned up", agent_name)
 
 
+def run_for_pr(yaml_path: str, context: dict, vcs: VCSPort) -> None:
+    """Execute an agent against a GitHub pull request using the config in *yaml_path*.
+
+    This is the entry point for PR-based agent runs, used by both Reven (review
+    output) and Cody (rework commits). It follows the same three-stage lifecycle
+    as :func:`run` but fetches the PR diff and builds a PR-specific user message.
+
+    Steps:
+    1. Load the agent's YAML config.
+    2. Create a fresh temporary workspace.
+    3. Clone the target repository into that workspace.
+    4. Fetch the PR diff via ``vcs.get_pr_diff`` — writes ``diff.patch`` to
+       the workdir and returns its path.
+    5. Build a PR-specific user message and invoke the configured CLI runner.
+    6. If ``output: review`` is set in the YAML, read ``review.json`` from the
+       workdir and post the review via ``vcs.post_review``; on failure, apply the
+       ``human:review`` label and log the error without propagating.
+    7. Always clean up the temporary workspace.
+
+    The YAML ``output`` field:
+        - ``output: review`` — agent is expected to write ``review.json`` with
+          ``state`` and ``body`` keys after the run.
+        - Absent (default) — agent is a Cody-style rework run; ``review.json``
+          is ignored.
+
+    Args:
+        yaml_path: Absolute path to the agent's YAML configuration file.
+        context: Dictionary of PR event metadata. Required keys:
+            ``repo_full_name``, ``pr_number``, ``pr_title``, ``pr_body``,
+            ``head_branch``, ``base_branch``, ``review_body``, ``github_token``.
+        vcs: VCSPort implementation used to fetch the diff and post review output.
+    """
+    with open(yaml_path) as f:
+        config = yaml.safe_load(f)
+
+    agent_name = config.get("name", "agent")
+    system_prompt = config.get("system_prompt", "")
+    model_cfg = config.get("model", {})
+    runner_type = config.get("runner", "claude-code")
+
+    repo = context["repo_full_name"]
+    pr_number = context["pr_number"]
+
+    logger.info(
+        "[%s] starting PR run — runner=%s pr=#%s repo=%s",
+        agent_name, runner_type, pr_number, repo,
+    )
+
+    workdir = tempfile.mkdtemp(prefix=f"hive-{agent_name}-pr-")
+    logger.info("[%s] workdir=%s", agent_name, workdir)
+
+    try:
+        logger.info("[%s] cloning %s", agent_name, repo)
+        _clone_repo(repo, context["github_token"], workdir)
+        logger.info("[%s] clone done", agent_name)
+
+        diff_path = vcs.get_pr_diff(repo, pr_number, workdir)
+        logger.info("[%s] diff written to %s", agent_name, diff_path)
+
+        user_message = _build_pr_user_message(context)
+        timeout = config.get("timeout", 900)
+
+        if runner_type == "claude-code":
+            _invoke_claude_cli(
+                system_prompt, model_cfg, context, workdir, agent_name, timeout,
+                user_message=user_message,
+            )
+        elif runner_type == "codex":
+            _invoke_codex_cli(
+                system_prompt, model_cfg, context, workdir, agent_name, timeout,
+                user_message=user_message,
+            )
+        else:
+            raise ValueError(f"Unknown runner: {runner_type}")
+
+        if config.get("output") == "review":
+            review_path = os.path.join(workdir, "review.json")
+            _handle_review_output(vcs, repo, pr_number, review_path, agent_name)
+
+        logger.info("[%s] PR run complete", agent_name)
+    except Exception:
+        logger.exception("[%s] PR run failed", agent_name)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+        logger.info("[%s] workdir cleaned up", agent_name)
+
+
 def _clone_repo(repo_full_name: str, token: str, workdir: str) -> None:
     """Clone a GitHub repository into *workdir* using token-based authentication.
 
@@ -111,6 +201,7 @@ def _invoke_claude_cli(
     workdir: str,
     agent_name: str,
     timeout: int = 900,
+    user_message: str | None = None,
 ) -> None:
     """Invoke the Claude Code CLI inside *workdir* with the given system prompt.
 
@@ -126,9 +217,14 @@ def _invoke_claude_cli(
         context: GitHub event metadata dict — see :func:`run` for expected keys.
         workdir: Path to the cloned repository workspace.
         agent_name: Human-readable agent identifier used in log prefixes.
+        timeout: Maximum seconds to wait for the CLI process to complete.
+        user_message: Pre-built user prompt string. When ``None`` (default), the
+            message is constructed from *context* via :func:`_build_user_message`.
+            Pass an explicit value for PR-based runs that require a different format.
     """
     model_name = model_cfg.get("name", "claude-sonnet-4-6")
-    user_message = _build_user_message(context)
+    if user_message is None:
+        user_message = _build_user_message(context)
 
     max_turns = model_cfg.get("max_turns", 40)
     cmd = [
@@ -179,6 +275,7 @@ def _invoke_codex_cli(
     workdir: str,
     agent_name: str,
     timeout: int = 900,
+    user_message: str | None = None,
 ) -> None:
     """Invoke the OpenAI Codex CLI inside *workdir* with the given system prompt.
 
@@ -194,11 +291,17 @@ def _invoke_codex_cli(
         context: GitHub event metadata dict — see :func:`run` for expected keys.
         workdir: Path to the cloned repository workspace.
         agent_name: Human-readable agent identifier used in log prefixes.
+        timeout: Maximum seconds to wait for the CLI process to complete.
+        user_message: Pre-built user prompt string. When ``None`` (default), the
+            message is constructed from *context* via :func:`_build_user_message`.
+            Pass an explicit value for PR-based runs that require a different format.
     """
     model_name = model_cfg.get("name", "o4-mini")
+    if user_message is None:
+        user_message = _build_user_message(context)
     # Codex receives one combined prompt because it has no separate system-prompt
     # flag; the horizontal rule visually separates instructions from user content.
-    full_prompt = f"{system_prompt}\n\n---\n\n{_build_user_message(context)}"
+    full_prompt = f"{system_prompt}\n\n---\n\n{user_message}"
 
     cmd = [
         "codex", "exec",
@@ -282,3 +385,85 @@ def _build_user_message(context: dict) -> str:
         f"GitHub token is available in the environment variable GITHUB_TOKEN.\n"
         f"The repository has already been cloned to your working directory."
     )
+
+
+def _build_pr_user_message(context: dict) -> str:
+    """Build the user-facing prompt that describes a GitHub pull request to the agent.
+
+    Includes the PR title, body, head/base branches, a reference to the diff
+    patch file already written to the workdir, and optionally the review body
+    from a previous Reven pass (for Cody rework runs).
+
+    Args:
+        context: PR event metadata dict containing ``repo_full_name``,
+            ``pr_number``, ``pr_title``, ``pr_body``, ``head_branch``,
+            ``base_branch``, ``review_body``, and ``github_token``.
+
+    Returns:
+        A multi-line string ready to be piped into an AI CLI runner via stdin.
+    """
+    review_section = ""
+    if context.get("review_body"):
+        review_section = f"\n{context['review_body']}\n"
+
+    return (
+        f"Repository: {context['repo_full_name']}\n"
+        f"PR #{context['pr_number']}: {context['pr_title']}\n\n"
+        f"{context['pr_body']}\n\n"
+        f"Head branch: {context['head_branch']}\n"
+        f"Base branch: {context['base_branch']}\n"
+        f"Diff: see diff.patch in your working directory.\n"
+        f"{review_section}\n"
+        f"GitHub token is available in the environment variable GITHUB_TOKEN.\n"
+        f"The repository has already been cloned to your working directory."
+    )
+
+
+def _handle_review_output(
+    vcs: VCSPort,
+    repo: str,
+    pr_number: int,
+    review_path: str,
+    agent_name: str,
+) -> None:
+    """Post review output from ``review.json`` or apply the ``human:review`` fallback.
+
+    Attempts to read ``{workdir}/review.json`` written by a Reven run. If the
+    file is present and contains valid JSON with ``state`` and ``body`` keys,
+    it calls ``vcs.post_review`` to submit the review on GitHub. Otherwise it
+    logs the failure and applies the ``human:review`` label so a human is
+    notified. Errors from either path are logged but never re-raised so that
+    the caller's cleanup always runs.
+
+    Args:
+        vcs: VCSPort implementation used to post the review or apply the label.
+        repo: Full repository identifier in ``owner/repo`` form.
+        pr_number: Pull request number.
+        review_path: Absolute path to the expected ``review.json`` file.
+        agent_name: Human-readable agent name used in log prefixes.
+    """
+    try:
+        with open(review_path) as f:
+            data: dict = json.load(f)
+
+        # Validate that the required keys are present before making any API call.
+        if "state" not in data or "body" not in data:
+            raise ValueError(
+                f"review.json is missing required keys 'state' and/or 'body': {list(data.keys())}"
+            )
+
+        vcs.post_review(repo, pr_number, data["body"], data["state"])
+        logger.info("[%s] review posted for pr=#%d state=%s", agent_name, pr_number, data["state"])
+
+    except (FileNotFoundError, json.JSONDecodeError, ValueError, KeyError) as exc:
+        logger.error(
+            "[%s] review.json absent or malformed for pr=#%d: %s — applying human:review label",
+            agent_name, pr_number, exc,
+        )
+        try:
+            vcs.apply_label(repo, pr_number, "human:review")
+            logger.info("[%s] applied human:review label to pr=#%d", agent_name, pr_number)
+        except Exception:
+            logger.exception(
+                "[%s] could not apply human:review label to pr=#%d", agent_name, pr_number
+            )
