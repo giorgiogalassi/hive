@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hive"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pyyaml",
+    "requests",
+]
+
+[project.scripts]
+hive = "hive_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["runner*"]
+
+[tool.setuptools]
+py-modules = ["hive_cli"]
