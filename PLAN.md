@@ -9,9 +9,11 @@ Giorgio Galassi | 2026
 Build Hive, a personal open source tool to deploy agents remotely
 and activate them via external triggers (GitHub webhooks, issue labels, etc.).
 
-Primary use case: add the label `agent:review` to a GitHub issue,
-a remote agent reads it, analyzes feasibility, and posts a structured comment.
-No manual intervention between trigger and result.
+Primary use case: add a label to a GitHub issue or PR, a remote agent picks it up,
+does the work, and posts the result back. No manual intervention between trigger and result.
+
+Interaction model: labels are entry points and orchestrator-owned audit trail.
+Steering mid-flight happens via PR comments, same as with a human colleague.
 
 Claude Code usage: brainstorming and planning only. Execution is handled
 by the remote agents.
@@ -27,8 +29,8 @@ by the remote agents.
 | Provider abstraction | LiteLLM | Normalizes tool calls across Anthropic/OpenAI/Ollama |
 | Agent config | Custom declarative YAML | Versionable, readable, not tied to any framework |
 | Containerization | Docker + Docker Compose | Full portability, deploy anywhere |
-| Deploy CLI | `hive` (minimal Python script) | 3 commands: deploy, list, remove |
-| Local dev tunnel | localtunnel (current) / ngrok / Cloudflare Tunnel | Local testing without external infrastructure. Using localtunnel (`npx localtunnel --port 8000`) — no account needed. Downside: URL changes on restart, requires updating the GitHub webhook. Migrate to a stable URL in Phase 4. |
+| Deploy CLI | `hive` (minimal Python script) | Commands: deploy, list, remove, run |
+| Local dev tunnel | localtunnel (current) / ngrok / Cloudflare Tunnel | Local testing without external infrastructure. Using localtunnel (`npx localtunnel --port 8000`) — no account needed. Downside: URL changes on restart, requires updating the GitHub webhook. Migrate to a stable URL in Phase 5. |
 | Hosting (future) | Hetzner VPS + Cloudflare DNS | ~6 EUR/month, fixed IP, zero vendor lock-in |
 | GitHub auth | PAT with limited scopes (then GitHub App) | Separate identity for the agent |
 
@@ -178,22 +180,85 @@ Required guardrails before this phase:
 
 ---
 
-### Phase 4 — `hive` CLI and VPS deploy
+### Phase 4 — Agent integration, batch execution, and full interaction model
 
-Goal: move off ngrok, have a stable deploy.
+Goal: integrate Cody and Reven as deployed agents, implement `hive run` for batch
+execution, and complete the comment-driven rework loop.
+
+#### Label model
+
+Labels are owned by the orchestrator except for the three manual entry points.
+Humans never apply labels mid-flow to steer — that's what PR comments are for.
+
+| Label | Applied by | Meaning |
+|---|---|---|
+| `agent:analyze` | Human (manual) | Analyze a foreign/work issue before deciding to develop |
+| `agent:develop` | Human (manual) | Implement a single issue |
+| `agent:review` | Orchestrator | Reven reviews the PR (auto-applied after Cody opens it) |
+| `human:review` | Orchestrator | Agent failed unrecoverably, human must inspect logs |
+
+`hive run` is the third entry point for batch execution — no label needed, it drives
+the loop itself and applies `agent:develop` per issue internally.
+
+#### Comment-driven rework
+
+Hive watches `issue_comment` webhooks on PRs. A comment from the repo owner
+re-queues Cody with the comment as additional context. Reven's review feedback
+feeds back into Cody the same way. No label changes needed to request rework.
+
+#### `hive run` — batch execution
 
 ```bash
-hive deploy agents/issue-reviewer.yaml
+hive run --project my-feature
+```
+
+Fetches all issues with a given label/milestone, applies the dependency order
+Chisel wrote at issue-creation time, and executes Cody → Reven per issue
+sequentially. Deterministic loop, no LLM orchestrator at runtime.
+
+```bash
+hive deploy agents/cody.yaml
 hive list
-hive remove issue-reviewer
-hive deploy agents/issue-reviewer.yaml --provider openai --model gpt-4o
+hive remove cody
+hive run --project my-feature
+```
+
+#### Agent integration
+
+Cody and Reven system prompts live directly in their deploy YAMLs inside `hive/agents/`.
+They are copied from agent-squad at migration time. Agent-squad remains the source
+for interactive CLI use; Hive owns the deployed versions. Prompts may diverge over time
+as autonomous and interactive use cases differ — that's expected and fine.
+
+Suggested port order: Reven first (read-only, zero risk), then Cody.
+
+#### Deliverables
+- `hive run` command added to the CLI
+- `agents/reven.yaml` with system prompt + `agent:review` trigger (PR events)
+- `agents/cody.yaml` with system prompt + `agent:develop` trigger
+- `issue_comment` webhook handler for comment-driven rework
+- `human:review` label applied on unrecoverable agent failure
+- Label rename: `agent:review` on issues → `agent:analyze`
+
+Definition of done: assign `agent:develop` to a real issue, Cody opens a PR,
+Reven posts a review, a PR comment re-queues Cody, final PR is ready for human merge.
+
+---
+
+### Phase 5 — VPS deploy
+
+Goal: move off localtunnel, have a stable public URL.
+
+```bash
+hive deploy agents/cody.yaml  # same commands, now pointing at VPS
 ```
 
 Deliverables:
-- `hive` Python script (~150-200 lines)
 - Deploy to Hetzner VPS via Docker Compose
 - Cloudflare DNS for a stable URL
 - GitHub webhook pointing to the VPS URL
+
+No new agent features in this phase — pure infrastructure.
 
 ---
 
@@ -232,56 +297,44 @@ If opened to multi-user scenarios or third-party repos, add a sandbox
 
 ## Integration with Agent Squad
 
-### What problem it solves
+### Separation of concerns
 
-Squad agents (Cody, Reven, Forge, etc.) today run interactively inside
-the Claude Code CLI. They require active presence.
-Hive makes them autonomous and trigger-driven.
+Agent-squad owns the interactive CLI workflow: Forge, Archy, Chisel, Seed, Lore.
+These are design-time tools that require dialogue and human presence. They stay local.
 
-### How it integrates
+Hive owns autonomous execution: Cody and Reven deployed as trigger-driven agents.
+These are runtime tools that run unattended.
 
-Every squad agent already has a defined system prompt
-(`.md` for Claude Code, `.toml` for Codex). The migration is:
+Ralph is retired from the Hive architecture. Its two responsibilities are now split:
+dependency ordering happens at Chisel time (design), execution looping happens in
+`hive run` (deterministic code). No LLM orchestrator is needed at runtime.
+
+### Migration approach
+
+System prompts are copied from agent-squad into Hive's deploy YAMLs directly.
+No reference model, no indirection. Hive owns its deployed agent definitions.
+Prompts may diverge as autonomous and interactive use cases differ — expected.
 
 ```
-agents/cody.md (Claude Code format)
+claude/agents/cody.md
         ↓
-Extract system_prompt
-Define tool list (bash + read + write, same as today)
+Copy system_prompt
         ↓
-agents/cody-deploy.yaml (Hive format)
+hive/agents/cody.yaml  (owns it from here)
 ```
 
-The Python runner has no knowledge of whether an agent was written
-for Claude Code or Codex. The logic lives in the system prompt;
-the runner is agnostic.
+### Squad flow with Hive
 
-### Priority agents to port
-
-| Squad Agent | GitHub Trigger | Immediate Value |
-|---|---|---|
-| Cody | Label `agent:develop` | Implements issue and opens PR |
-| Reven | Label `agent:review` on PR | Reviews PR without manual invocation |
-| Forge | Label `agent:forge` on issue | Produces analysis YAML as a comment |
-| Chisel | Label `agent:chisel` on issue | Creates Linear issues from a GitHub issue |
-
-Suggested order: Reven first (read-only, zero risk), then Cody.
-
-### Difference from current usage
-
-Today with Claude Code:
 ```
-You invoke manually → agent works → you wait → result
+Forge (local) → Archy (local) → Chisel (local, creates issues with dependency order)
+        ↓
+hive run --project my-feature
+        ↓
+Cody implements per issue → PR opened → Reven reviews → human merges
 ```
 
-With Hive:
-```
-You assign label → agent works in background → notification → you review
-```
-
-Claude Code remains the tool for brainstorming, interactive Forge sessions,
-and architectural work that requires dialogue. Hive handles repetitive,
-autonomous execution.
+Claude Code remains the tool for brainstorming, Forge sessions, and architectural
+work that requires dialogue. Hive handles autonomous execution.
 
 ---
 
@@ -333,7 +386,7 @@ This project reinforces it with a concrete implementation.
 ### D4 — Evaluation, Error Analysis, and Tuning (15-20%)
 
 What you practice:
-- Retry logic when the agent fails (max 3 attempts, like Ralph)
+- Retry logic when the agent fails (max 3 attempts, implemented in `hive run`)
 - Structured logs for post-run analysis
 - Comparing output across providers (AnthropicAdapter vs OpenAI)
 - System prompt tuning based on real results
@@ -379,12 +432,14 @@ with natural concentration on D2, which is the heaviest and your largest gap.
 
 ---
 
-## Immediate Next Steps
+## Immediate Next Steps (Phase 4)
 
-1. Create `hive` repo on GitHub
-2. Scaffold folder structure
-3. Phase 1: FastAPI + webhook receiver + Docker Compose + ngrok
-4. Test with real GitHub: label an issue, see payload logged
+Phases 1–3 are complete. `agent:develop` is verified end-to-end: label fires,
+agent runs remotely, PR opens.
 
-Phase 1 definition of done: a real label payload appears in the container
-logs running locally.
+1. Port Reven system prompt from agent-squad → `agents/reven.yaml`, wire to PR events
+2. Port Cody system prompt from agent-squad → `agents/cody.yaml`, auto-trigger Reven after PR opens
+3. Add `issue_comment` webhook handler — re-queue Cody with comment as context
+4. Add `human:review` label on unrecoverable failure
+5. Rename `agent:review` on issues to `agent:analyze`
+6. Implement `hive run --project` batch command with topological sort over issue dependencies
