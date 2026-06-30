@@ -5,14 +5,21 @@ hive — Autonomous agent orchestrator CLI.
 Entry point for running Hive agents against a labelled set of GitHub issues.
 
 Usage:
-    hive run --project <label>   Execute agents on all open issues with <label>
-    hive deploy                  (not implemented)
-    hive list                    (not implemented)
-    hive remove                  (not implemented)
+    hive run --project <label>              Execute agents on all open issues with <label>
+    hive run --project <label> --repo o/r  Override the target repository
+    hive deploy                             (not implemented)
+    hive list                               (not implemented)
+    hive remove                             (not implemented)
 
-Environment variables required for `hive run`:
-    GITHUB_TOKEN   Personal Access Token with repo read/write access.
-    GITHUB_REPO    Full repository name in owner/repo format.
+Repository resolution order for `hive run`:
+    1. --repo flag (per-invocation override)
+    2. GITHUB_REPO environment variable (CI / Docker override)
+    3. git remote get-url origin (auto-detected from the current repo)
+
+Environment variables:
+    GITHUB_TOKEN   Personal Access Token with repo read/write access (required).
+    GITHUB_REPO    Full repository name in owner/repo format (optional if running
+                   inside a git repo with an 'origin' remote).
 """
 
 import argparse
@@ -35,9 +42,17 @@ def cmd_run(args):
     import runner.agent_runner as agent_runner
 
     token = os.environ.get("GITHUB_TOKEN", "")
-    repo = os.environ.get("GITHUB_REPO", "")
-    if not token or not repo:
-        print("ERROR: GITHUB_TOKEN and GITHUB_REPO must be set", file=sys.stderr)
+    if not token:
+        print("ERROR: GITHUB_TOKEN must be set", file=sys.stderr)
+        sys.exit(1)
+
+    repo = args.repo or os.environ.get("GITHUB_REPO", "") or _detect_repo()
+    if not repo:
+        print(
+            "ERROR: could not determine repository. Use --repo, set GITHUB_REPO, "
+            "or run from inside a git repo with an 'origin' remote.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     vcs = GitHubAdapter()
@@ -125,6 +140,39 @@ def cmd_run(args):
         print(f"[hive run] Issue #{number} complete.")
 
 
+def _detect_repo():
+    """Detect the GitHub repository from the 'origin' git remote URL.
+
+    Parses both HTTPS (https://github.com/owner/repo.git) and SSH
+    (git@github.com:owner/repo.git) remote URL formats.
+
+    Returns:
+        A string in ``owner/repo`` format, or an empty string if detection fails.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        url = result.stdout.strip()
+        # HTTPS: https://github.com/owner/repo.git
+        if url.startswith("https://"):
+            path = url.split("github.com/", 1)[-1].removesuffix(".git")
+            if "/" in path:
+                return path
+        # SSH: git@github.com:owner/repo.git
+        if ":" in url:
+            path = url.split(":", 1)[-1].removesuffix(".git")
+            if "/" in path:
+                return path
+    except Exception:
+        pass
+    return ""
+
+
 def _poll_for_pr(vcs, repo, issue_number, token, interval=30, max_attempts=10):
     """Poll GitHub for an open PR whose head branch matches agent/issue-{N}-*.
 
@@ -186,6 +234,11 @@ def main():
 
     run_p = sub.add_parser("run", help="Execute agents on a labelled set of GitHub issues")
     run_p.add_argument("--project", required=True, help="GitHub issue label to target")
+    run_p.add_argument(
+        "--repo",
+        default="",
+        help="Repository in owner/repo format (overrides GITHUB_REPO and git remote detection)",
+    )
 
     sub.add_parser("deploy", help="Deploy an agent (not implemented)")
     sub.add_parser("list", help="List deployed agents (not implemented)")
