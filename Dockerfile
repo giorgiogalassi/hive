@@ -17,10 +17,8 @@ RUN useradd -m -u 1000 hive
 USER hive
 WORKDIR /home/hive/app
 
-COPY --chown=hive:hive requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
 COPY --chown=hive:hive . .
+RUN pip install --no-cache-dir ".[server]"
 
 EXPOSE 8000
 

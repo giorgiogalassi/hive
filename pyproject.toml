@@ -7,10 +7,14 @@ name = "hive"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi",
-    "uvicorn[standard]",
     "pyyaml",
     "requests",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi",
+    "uvicorn[standard]",
 ]
 
 [project.scripts]
