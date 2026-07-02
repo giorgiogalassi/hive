@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 # Base URL for all GitHub REST API v3 calls.
 _GITHUB_API = "https://api.github.com"
 
+# Default timeout (seconds) applied to every outbound HTTP request.
+# Prevents a hung connection from blocking the run or webhook worker indefinitely.
+_HTTP_TIMEOUT = 30
+
 
 def _auth_headers() -> dict[str, str]:
     """Return HTTP headers required for authenticated GitHub API requests.
@@ -187,7 +191,9 @@ class GitHubAdapter(VCSPort):
             requests.HTTPError: If the API returns a non-2xx status.
         """
         url = f"{_GITHUB_API}/repos/{repo}/issues/{number}/labels"
-        response = requests.post(url, headers=_auth_headers(), json={"labels": [label]})
+        response = requests.post(
+            url, headers=_auth_headers(), json={"labels": [label]}, timeout=_HTTP_TIMEOUT
+        )
         response.raise_for_status()
         logger.debug("apply_label: repo=%s number=%d label=%s", repo, number, label)
 
@@ -206,7 +212,7 @@ class GitHubAdapter(VCSPort):
             requests.HTTPError: If the API returns a non-2xx status.
         """
         url = f"{_GITHUB_API}/repos/{repo}/issues/{number}/labels"
-        response = requests.get(url, headers=_auth_headers())
+        response = requests.get(url, headers=_auth_headers(), timeout=_HTTP_TIMEOUT)
         response.raise_for_status()
         labels: list[dict] = response.json()
         return any(lbl["name"] == label for lbl in labels)
@@ -247,6 +253,7 @@ class GitHubAdapter(VCSPort):
             url,
             headers=_auth_headers(),
             json={"body": body, "event": github_state},
+            timeout=_HTTP_TIMEOUT,
         )
         response.raise_for_status()
         logger.debug(
@@ -265,7 +272,9 @@ class GitHubAdapter(VCSPort):
             requests.HTTPError: If the API returns a non-2xx status.
         """
         url = f"{_GITHUB_API}/repos/{repo}/issues/{number}/comments"
-        response = requests.post(url, headers=_auth_headers(), json={"body": body})
+        response = requests.post(
+            url, headers=_auth_headers(), json={"body": body}, timeout=_HTTP_TIMEOUT
+        )
         response.raise_for_status()
         logger.debug("post_comment: repo=%s number=%d", repo, number)
 
@@ -291,7 +300,7 @@ class GitHubAdapter(VCSPort):
         """
         # Retrieve head and base branch names from the GitHub API.
         url = f"{_GITHUB_API}/repos/{repo}/pulls/{pr_number}"
-        response = requests.get(url, headers=_auth_headers())
+        response = requests.get(url, headers=_auth_headers(), timeout=_HTTP_TIMEOUT)
         response.raise_for_status()
         pr_data = response.json()
         head_branch: str = pr_data["head"]["ref"]
@@ -350,7 +359,7 @@ class GitHubAdapter(VCSPort):
         issues: list[dict] = []
 
         while url:
-            response = requests.get(url, headers=_auth_headers())
+            response = requests.get(url, headers=_auth_headers(), timeout=_HTTP_TIMEOUT)
             response.raise_for_status()
             page: list[dict] = response.json()
             issues.extend(
@@ -383,7 +392,7 @@ class GitHubAdapter(VCSPort):
             requests.HTTPError: If the API returns a non-2xx status.
         """
         url = f"{_GITHUB_API}/repos/{repo}/issues/{number}"
-        response = requests.get(url, headers=_auth_headers())
+        response = requests.get(url, headers=_auth_headers(), timeout=_HTTP_TIMEOUT)
         response.raise_for_status()
         raw: dict = response.json()
         return {
@@ -413,7 +422,7 @@ class GitHubAdapter(VCSPort):
         # Strategy 1: GitHub sub-issues API (may not be available on all plans).
         sub_url = f"{_GITHUB_API}/repos/{repo}/issues/{number}/sub_issues"
         try:
-            sub_response = requests.get(sub_url, headers=_auth_headers())
+            sub_response = requests.get(sub_url, headers=_auth_headers(), timeout=_HTTP_TIMEOUT)
             if sub_response.status_code in (404, 410):
                 logger.debug(
                     "get_issue_dependencies: sub_issues endpoint returned %d for %s#%d",
