@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 
+import requests
 import yaml
 
 from hive.runner.vcs.port import VCSPort
@@ -182,6 +183,7 @@ def run_for_pr(yaml_path: str, context: dict, vcs: VCSPort) -> None:
     except Exception:
         logger.exception("[%s] PR run failed", agent_name)
         needs_salvage = True
+        _post_failure_comment(context, agent_name)
     finally:
         if needs_salvage:
             try:
@@ -572,14 +574,23 @@ def _invoke_codex_cli(
 
 
 def _post_failure_comment(context: dict, agent_name: str) -> None:
-    issue = context.get("issue_number")
-    if not issue:
+    """Post a failure comment on the issue or PR associated with *context*.
+
+    Looks for ``issue_number`` first (issue runs) then ``pr_number`` (PR runs).
+    Best-effort: any exception is logged and swallowed so callers are never
+    interrupted by a comment-posting failure.
+    """
+    number = context.get("issue_number") or context.get("pr_number")
+    if not number:
         return
     body = (
         f"**Hive agent `{agent_name}` encountered an error.**\n\n"
         "The run failed before completing. Check the container logs for details."
     )
-    _post_comment(context, issue, agent_name, body)
+    try:
+        _post_comment(context, number, agent_name, body)
+    except Exception:
+        logger.warning("[%s] could not post failure comment", agent_name)
 
 
 def _post_comment(context: dict, number: int, agent_name: str, body: str) -> None:
@@ -593,16 +604,14 @@ def _post_comment(context: dict, number: int, agent_name: str, body: str) -> Non
     if not (token and repo):
         return
     try:
-        subprocess.run(
-            [
-                "curl", "-s", "-X", "POST",
-                "-H", f"Authorization: token {token}",
-                "-H", "Accept: application/vnd.github.v3+json",
-                f"https://api.github.com/repos/{repo}/issues/{number}/comments",
-                "-d", f'{{"body": {json.dumps(body)}}}',
-            ],
+        requests.post(
+            f"https://api.github.com/repos/{repo}/issues/{number}/comments",
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github.v3+json",
+            },
+            json={"body": body},
             timeout=15,
-            check=False,
         )
     except Exception:
         logger.warning("[%s] could not post comment", agent_name)
