@@ -23,9 +23,12 @@ Environment variables:
 """
 
 import argparse
+import logging
 import os
 import sys
 import time
+
+logger = logging.getLogger(__name__)
 
 
 def cmd_run(args):
@@ -102,42 +105,61 @@ def cmd_run(args):
     reven_yaml = os.path.join(agents_dir, "reven.yaml")
 
     # 5. Execute per issue
+    import requests as _requests
+
     for number in order:
         issue = issue_map[number]
         print(f"[hive run] Processing issue #{number}: {issue['title']}")
 
-        context = {
-            "repo_full_name": repo,
-            "issue_number": number,
-            "issue_title": issue["title"],
-            "issue_body": issue.get("body", "") or "",
-            "label": label,
-            "github_token": token,
-        }
+        try:
+            context = {
+                "repo_full_name": repo,
+                "issue_number": number,
+                "issue_title": issue["title"],
+                "issue_body": issue.get("body", "") or "",
+                "label": label,
+                "github_token": token,
+            }
 
-        # Run Cody (developer agent)
-        agent_runner.run(cody_yaml, context)
+            # Run Cody (developer agent)
+            agent_runner.run(cody_yaml, context)
 
-        # Poll for the PR Cody opened — branches are named agent/issue-{N}-*
-        pr = _poll_for_pr(vcs, repo, number, token, interval=30, max_attempts=10)
-        if not pr:
-            print(f"[hive run] WARNING: No PR found for issue #{number} after polling. Skipping Reven.")
-            continue
+            # Poll for the PR Cody opened — branches are named agent/issue-{N}-*
+            pr = _poll_for_pr(vcs, repo, number, token, interval=30, max_attempts=10)
+            if not pr:
+                print(f"[hive run] WARNING: No PR found for issue #{number} after polling. Skipping Reven.")
+                continue
 
-        # Run Reven (reviewer agent)
-        pr_context = {
-            "repo_full_name": repo,
-            "pr_number": pr["number"],
-            "pr_title": pr["title"],
-            "pr_body": pr.get("body", "") or "",
-            "head_branch": pr["head"]["ref"],
-            "base_branch": pr["base"]["ref"],
-            "review_body": "",
-            "github_token": token,
-        }
-        agent_runner.run_for_pr(reven_yaml, pr_context, vcs)
+            # Run Reven (reviewer agent)
+            pr_context = {
+                "repo_full_name": repo,
+                "pr_number": pr["number"],
+                "pr_title": pr["title"],
+                "pr_body": pr.get("body", "") or "",
+                "head_branch": pr["head"]["ref"],
+                "base_branch": pr["base"]["ref"],
+                "review_body": "",
+                "github_token": token,
+            }
+            agent_runner.run_for_pr(reven_yaml, pr_context, vcs)
 
-        print(f"[hive run] Issue #{number} complete.")
+            print(f"[hive run] Issue #{number} complete.")
+        except _requests.Timeout as exc:
+            logger.warning(
+                "issue #%d: GitHub API request timed out, skipping: %s", number, exc
+            )
+            print(
+                f"[hive run] WARNING: issue #{number} skipped — GitHub API timed out.",
+                file=sys.stderr,
+            )
+        except _requests.RequestException as exc:
+            logger.warning(
+                "issue #%d: GitHub API request failed, skipping: %s", number, exc
+            )
+            print(
+                f"[hive run] WARNING: issue #{number} skipped — HTTP error: {exc}",
+                file=sys.stderr,
+            )
 
 
 def _detect_repo():
@@ -197,15 +219,32 @@ def _poll_for_pr(vcs, repo, issue_number, token, interval=30, max_attempts=10):
         "Accept": "application/vnd.github.v3+json",
     }
     for attempt in range(max_attempts):
-        resp = requests.get(
-            f"https://api.github.com/repos/{repo}/pulls",
-            headers=headers,
-            params={"state": "open", "per_page": 50},
-        )
-        if resp.ok:
-            for pr in resp.json():
-                if pr["head"]["ref"].startswith(f"agent/issue-{issue_number}-"):
-                    return pr
+        try:
+            resp = requests.get(
+                f"https://api.github.com/repos/{repo}/pulls",
+                headers=headers,
+                params={"state": "open", "per_page": 50},
+                timeout=30,
+            )
+            if resp.ok:
+                for pr in resp.json():
+                    if pr["head"]["ref"].startswith(f"agent/issue-{issue_number}-"):
+                        return pr
+        except requests.Timeout:
+            logger.warning(
+                "_poll_for_pr: request timed out on attempt %d/%d for issue #%d",
+                attempt + 1,
+                max_attempts,
+                issue_number,
+            )
+        except requests.RequestException as exc:
+            logger.warning(
+                "_poll_for_pr: request error on attempt %d/%d for issue #%d: %s",
+                attempt + 1,
+                max_attempts,
+                issue_number,
+                exc,
+            )
         if attempt < max_attempts - 1:
             print(f"[hive run] Waiting for PR for issue #{issue_number}... ({attempt+1}/{max_attempts})")
             time.sleep(interval)
