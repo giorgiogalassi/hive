@@ -7,6 +7,12 @@ model:
   provider: anthropic
   name: claude-sonnet-4-6
   max_turns: 30
+  # max_turns is a per-iteration cap, not a hard kill: if an iteration hits it,
+  # the run checkpoints and resumes the same session for up to max_iterations
+  # rounds before giving up. idle_timeout kills a genuinely stalled iteration
+  # (no output for this many seconds) well before max_turns would even matter.
+  max_iterations: 4
+  idle_timeout: 240
 
 triggers:
   - type: github-label
