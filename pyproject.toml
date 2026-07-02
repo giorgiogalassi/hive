@@ -14,11 +14,11 @@ dependencies = [
 ]
 
 [project.scripts]
-hive = "hive_cli:main"
+hive = "hive.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["runner*"]
+include = ["hive*"]
 
-[tool.setuptools]
-py-modules = ["hive_cli"]
+[tool.setuptools.package-data]
+"hive.agents" = ["*.yaml"]
