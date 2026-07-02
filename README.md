@@ -2,7 +2,7 @@
 
 A personal tool to deploy agents remotely and activate them via external triggers (GitHub webhooks, issue labels, etc.).
 
-Primary use case: add the label `agent:review` to a GitHub issue, a remote agent reads it, analyzes feasibility, and posts a structured comment. No manual intervention between trigger and result.
+Primary use case: add the label `agent:develop` to a GitHub issue, a remote agent reads it, implements the change, and opens a PR for human review. No manual intervention between trigger and result.
 
 ---
 
@@ -52,6 +52,26 @@ For local tunnel testing:
 
 ---
 
+## Install
+
+**Global install (CLI only)**
+
+Install the `hive` CLI globally with `pipx` so it is available from any project directory:
+
+```bash
+pipx install .
+```
+
+Or with plain pip into a virtual environment:
+
+```bash
+pip install .
+```
+
+This exposes the `hive` command. Run `hive --help` to confirm.
+
+---
+
 ## Setup
 
 **1. Clone and configure environment**
@@ -84,7 +104,7 @@ npx localtunnel --port 8000
 
 This prints a public HTTPS URL (e.g. `https://fast-ears-rest.loca.lt`). Copy it.
 
-> The URL changes every time localtunnel restarts. Update the GitHub webhook URL when that happens. For a stable URL, use a VPS (Phase 4).
+> The URL changes every time localtunnel restarts. Update the GitHub webhook URL when that happens. For a stable URL, use a VPS (Phase 5).
 
 **4. Configure the GitHub webhook**
 
@@ -99,7 +119,59 @@ Go to your repo → Settings → Webhooks → Add webhook:
 
 **5. Trigger an agent**
 
-Apply the label `agent:review` to any issue. The agent will clone the repo, analyze the issue, and post a comment within ~60 seconds.
+Apply the label `agent:develop` to any issue. The agent will clone the repo, implement the change, and open a PR within ~60 seconds.
+
+---
+
+## `hive run` — batch execution
+
+Run all open issues carrying a given label in dependency order:
+
+```bash
+hive run --project <label>
+```
+
+Fetches every open issue with `<label>`, resolves the dependency order that Chisel wrote at issue-creation time, and executes Cody → Reven per issue sequentially. No LLM orchestrator at runtime — deterministic loop.
+
+```bash
+# Run all issues labelled "my-feature" in the current repo
+hive run --project my-feature
+
+# Target a specific repository
+hive run --project my-feature --repo owner/repo
+```
+
+**Repository resolution order:**
+
+1. `--repo` flag (per-invocation override)
+2. `GITHUB_REPO` environment variable
+3. `git remote get-url origin` (auto-detected from the current directory)
+
+**Machine-level secrets (recommended one-time setup):**
+
+```bash
+mkdir -p ~/.hive
+cat > ~/.hive/.env << 'EOF'
+GITHUB_TOKEN=ghp_your_token_here
+CLAUDE_CODE_OAUTH_TOKEN=your_oauth_token_here
+EOF
+chmod 600 ~/.hive/.env
+```
+
+With this in place, `hive run --project my-label` works from any project directory without exporting tokens in the shell.
+
+---
+
+## Label model (Phase 4)
+
+Labels are owned by the orchestrator except for the two manual entry points. Humans never apply labels mid-flow to steer — that's what PR comments are for.
+
+| Label | Applied by | Meaning |
+|---|---|---|
+| `agent:analyze` | Human (manual) | Analyze an issue before deciding to develop |
+| `agent:develop` | Human (manual) | Implement a single issue (Cody) |
+| `agent:review` | Orchestrator | Reven reviews the PR (auto-applied after Cody opens it) |
+| `human:review` | Orchestrator | Agent failed unrecoverably — human must inspect logs |
 
 ---
 
@@ -113,18 +185,17 @@ model:
   name: claude-sonnet-4-6
 triggers:
   - type: github-label
-    label: "agent:review"
+    label: "agent:analyze"
 system_prompt: |
   You are a senior software engineer...
 ```
 
-Add new agents by dropping a `.yaml` file in `agents/` and registering the label in `runner/main.py`:
+Add new agents by dropping a `.yaml` file in `agents/`. The label-to-agent mapping lives in `runner/main.py`:
 
 ```python
-_LABEL_TO_AGENT: dict[str, str] = {
-    "agent:review": "issue-reviewer.yaml",
-    "agent:develop": "issue-developer.yaml",  # example
-}
+# agent:analyze  →  issue-reviewer.yaml
+# agent:develop  →  cody.yaml
+# agent:review   →  reven.yaml  (applied automatically by the orchestrator)
 ```
 
 ---
@@ -156,26 +227,6 @@ The `hive` CLI is installed globally (via `pipx`) and runs from arbitrary projec
 
 Values already present in `os.environ` are **never overwritten** by either file. A variable in the cwd `.env` takes precedence over the same variable in `~/.hive/.env`. Both files are optional; missing files are silently skipped.
 
-**Recommended setup:**
-
-```bash
-# Machine-level secrets — set once per machine
-mkdir -p ~/.hive
-cat > ~/.hive/.env << 'EOF'
-GITHUB_TOKEN=ghp_your_token_here
-CLAUDE_CODE_OAUTH_TOKEN=your_oauth_token_here
-EOF
-chmod 600 ~/.hive/.env
-
-# Per-project config — committed or local to each repo
-cat > /path/to/my-project/.env << 'EOF'
-GITHUB_OWNER=your-github-username
-GITHUB_REPO=your-github-username/my-project
-EOF
-```
-
-With this setup, `hive run --project my-label` works from any project directory without exporting tokens in the shell.
-
 > **Docker / Compose:** The webhook server reads the repo-root `.env` via `env_file` in `docker-compose.yml` and is **not** affected by this layering.
 
 ---
@@ -185,9 +236,10 @@ With this setup, `hive run --project my-label` works from any project directory 
 | Phase | Status | Description |
 |---|---|---|
 | 1 | Done | Webhook receiver — receive, verify, log |
-| 2 | In progress | `issue-reviewer` agent — label triggers analysis comment |
-| 3 | Planned | `issue-developer` agent — label triggers branch + PR |
-| 4 | Planned | VPS deploy (Hetzner) |
+| 2 | Done | `issue-reviewer` agent — `agent:analyze` triggers analysis comment |
+| 3 | Done | `issue-developer` → replaced by Cody (`agent:develop` triggers branch + PR) |
+| 4 | Done | Agent integration (Cody + Reven), `hive run` batch command, comment-driven rework |
+| 5 | Planned | VPS deploy (Hetzner) — stable public URL, no localtunnel |
 
 ---
 
