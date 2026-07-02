@@ -133,10 +133,50 @@ _LABEL_TO_AGENT: dict[str, str] = {
 
 | Variable | Required | Description |
 |---|---|---|
-| `GITHUB_WEBHOOK_SECRET` | Yes | HMAC secret shared with GitHub webhook |
+| `GITHUB_WEBHOOK_SECRET` | Yes (Docker/webhook) | HMAC secret shared with GitHub webhook |
 | `GITHUB_TOKEN` | Yes | PAT for cloning repos and posting comments |
 | `CLAUDE_CODE_OAUTH_TOKEN` | For `runner: claude-code` | Obtained via `claude setup-token` |
 | `OPENAI_API_KEY` | For `runner: codex` | OpenAI key for Codex runner |
+| `GITHUB_OWNER` | Yes (CLI) | GitHub username of the repo owner |
+| `GITHUB_REPO` | No | Target repo in `owner/repo` format (auto-detected if unset) |
+
+---
+
+## Layered env resolution (CLI)
+
+The `hive` CLI is installed globally (via `pipx`) and runs from arbitrary project directories, so it uses a three-layer env resolution strategy instead of relying on a single `.env` location.
+
+**Priority order (highest → lowest):**
+
+| Layer | Source | Typical contents |
+|---|---|---|
+| 1 | `os.environ` / shell exports | CI secrets, manually exported vars — **always win** |
+| 2 | `.env` in the current working directory | Per-project config: `GITHUB_OWNER`, `GITHUB_REPO` |
+| 3 | `~/.hive/.env` | Machine-level secrets: `GITHUB_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` |
+
+Values already present in `os.environ` are **never overwritten** by either file. A variable in the cwd `.env` takes precedence over the same variable in `~/.hive/.env`. Both files are optional; missing files are silently skipped.
+
+**Recommended setup:**
+
+```bash
+# Machine-level secrets — set once per machine
+mkdir -p ~/.hive
+cat > ~/.hive/.env << 'EOF'
+GITHUB_TOKEN=ghp_your_token_here
+CLAUDE_CODE_OAUTH_TOKEN=your_oauth_token_here
+EOF
+chmod 600 ~/.hive/.env
+
+# Per-project config — committed or local to each repo
+cat > /path/to/my-project/.env << 'EOF'
+GITHUB_OWNER=your-github-username
+GITHUB_REPO=your-github-username/my-project
+EOF
+```
+
+With this setup, `hive run --project my-label` works from any project directory without exporting tokens in the shell.
+
+> **Docker / Compose:** The webhook server reads the repo-root `.env` via `env_file` in `docker-compose.yml` and is **not** affected by this layering.
 
 ---
 
