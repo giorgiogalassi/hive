@@ -16,17 +16,98 @@ Repository resolution order for `hive run`:
     2. GITHUB_REPO environment variable (CI / Docker override)
     3. git remote get-url origin (auto-detected from the current repo)
 
-Environment variables:
-    GITHUB_TOKEN   Personal Access Token with repo read/write access (required).
-    GITHUB_REPO    Full repository name in owner/repo format (optional if running
-                   inside a git repo with an 'origin' remote).
+Environment variables (layered resolution — highest priority first):
+    1. os.environ / shell exports  — always win; never overridden by any .env file.
+    2. .env in cwd                 — per-project config (e.g. GITHUB_OWNER, GITHUB_REPO).
+    3. ~/.hive/.env                — machine-level secret fallback (e.g. GITHUB_TOKEN,
+                                     CLAUDE_CODE_OAUTH_TOKEN).
+
+    The Docker / Compose consumer reads the repo-root .env via ``env_file`` and is
+    unaffected by this layering — it does not call ``_load_env()``.
 """
 
 import argparse
 import importlib.resources
 import os
+import pathlib
 import sys
 import time
+
+
+def _parse_dotenv(path: pathlib.Path) -> dict[str, str]:
+    """Parse a ``.env`` file and return a dict of key→value pairs.
+
+    Handles the following syntax:
+    - Blank lines and lines starting with ``#`` are ignored.
+    - ``KEY=VALUE`` — bare value.
+    - ``KEY="VALUE"`` or ``KEY='VALUE'`` — surrounding quotes are stripped.
+    - ``export KEY=VALUE`` — the leading ``export`` keyword is ignored.
+    - Inline ``#`` comments are **not** stripped (values are taken verbatim after
+      the ``=``), which is the safest default for token strings.
+
+    Args:
+        path: Absolute or relative path to the ``.env`` file.
+
+    Returns:
+        Mapping of environment variable names to their string values.
+    """
+    result: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return result
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Strip optional leading "export " keyword
+        if line.startswith("export "):
+            line = line[len("export "):]
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        # Strip matching surrounding quotes
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        if key:
+            result[key] = value
+    return result
+
+
+def _load_env() -> None:
+    """Apply layered ``.env`` resolution to ``os.environ``.
+
+    Priority (highest first):
+
+    1. **os.environ** — values already in the environment (shell exports, CI
+       injections) are **never overwritten**.
+    2. **cwd/.env** — per-project config that varies with the working directory
+       (e.g. ``GITHUB_OWNER``, ``GITHUB_REPO``).
+    3. **~/.hive/.env** — machine-level secret fallback (e.g. ``GITHUB_TOKEN``,
+       ``CLAUDE_CODE_OAUTH_TOKEN``).
+
+    Both files are optional; missing files are silently skipped.
+
+    The Docker / Compose consumer reads the repo-root ``.env`` via ``env_file``
+    in ``docker-compose.yml`` and does **not** call this function, so its
+    behaviour is unchanged.
+    """
+    merged: dict[str, str] = {}
+
+    # Layer 3 — machine-level fallback (loaded first → lowest file priority)
+    global_env = pathlib.Path.home() / ".hive" / ".env"
+    merged.update(_parse_dotenv(global_env))
+
+    # Layer 2 — per-project overrides (loaded second → wins over Layer 3)
+    cwd_env = pathlib.Path.cwd() / ".env"
+    merged.update(_parse_dotenv(cwd_env))
+
+    # Layer 1 — os.environ always wins; only inject keys that are not already set
+    for key, value in merged.items():
+        if key not in os.environ:
+            os.environ[key] = value
 
 
 def _agent_yaml(name: str) -> str:
@@ -244,6 +325,10 @@ def cmd_stub(name):
 
 def main():
     """Parse CLI arguments and dispatch to the appropriate subcommand handler."""
+    # Resolve environment variables from layered .env files before any subcommand
+    # reads os.environ.  Order: os.environ > cwd/.env > ~/.hive/.env.
+    _load_env()
+
     parser = argparse.ArgumentParser(description="Hive — autonomous agent orchestrator")
     sub = parser.add_subparsers(dest="command")
 
