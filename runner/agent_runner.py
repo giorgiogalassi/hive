@@ -96,7 +96,7 @@ def run(yaml_path: str, context: dict) -> None:
         logger.info("[%s] workdir cleaned up", agent_name)
 
 
-def run_for_pr(yaml_path: str, context: dict, vcs: VCSPort) -> None:
+def run_for_pr(yaml_path: str, context: dict, vcs: VCSPort) -> dict | None:
     """Execute an agent against a GitHub pull request using the config in *yaml_path*.
 
     This is the entry point for PR-based agent runs, used by both Reven (review
@@ -117,9 +117,10 @@ def run_for_pr(yaml_path: str, context: dict, vcs: VCSPort) -> None:
 
     The YAML ``output`` field:
         - ``output: review`` — agent is expected to write ``review.json`` with
-          ``state`` and ``body`` keys after the run.
+          ``state`` and ``body`` keys after the run. The parsed dict is returned
+          to the caller so it can drive a rework loop.
         - Absent (default) — agent is a Cody-style rework run; ``review.json``
-          is ignored.
+          is ignored and ``None`` is returned.
 
     Args:
         yaml_path: Absolute path to the agent's YAML configuration file.
@@ -127,6 +128,11 @@ def run_for_pr(yaml_path: str, context: dict, vcs: VCSPort) -> None:
             ``repo_full_name``, ``pr_number``, ``pr_title``, ``pr_body``,
             ``head_branch``, ``base_branch``, ``review_body``, ``github_token``.
         vcs: VCSPort implementation used to fetch the diff and post review output.
+
+    Returns:
+        When the agent is configured with ``output: review``, returns the parsed
+        ``review.json`` dict (containing at minimum ``state`` and ``body``).
+        Returns ``None`` for rework runs or when the review could not be read.
     """
     with open(yaml_path) as f:
         config = yaml.safe_load(f)
@@ -149,6 +155,7 @@ def run_for_pr(yaml_path: str, context: dict, vcs: VCSPort) -> None:
 
     needs_salvage = False
     base_sha = None
+    review_result: dict | None = None
     try:
         logger.info("[%s] cloning %s", agent_name, repo)
         _clone_repo(repo, context["github_token"], workdir)
@@ -176,7 +183,7 @@ def run_for_pr(yaml_path: str, context: dict, vcs: VCSPort) -> None:
 
         if config.get("output") == "review":
             review_path = os.path.join(workdir, "review.json")
-            _handle_review_output(vcs, repo, pr_number, review_path, agent_name)
+            review_result = _handle_review_output(vcs, repo, pr_number, review_path, agent_name)
 
         logger.info("[%s] PR run complete", agent_name)
     except Exception:
@@ -191,6 +198,8 @@ def run_for_pr(yaml_path: str, context: dict, vcs: VCSPort) -> None:
 
         shutil.rmtree(workdir, ignore_errors=True)
         logger.info("[%s] workdir cleaned up", agent_name)
+
+    return review_result
 
 
 def _clone_repo(repo_full_name: str, token: str, workdir: str) -> None:
@@ -670,7 +679,7 @@ def _handle_review_output(
     pr_number: int,
     review_path: str,
     agent_name: str,
-) -> None:
+) -> dict | None:
     """Post review output from ``review.json`` or apply the ``human:review`` fallback.
 
     Attempts to read ``{workdir}/review.json`` written by a Reven run. If the
@@ -686,6 +695,10 @@ def _handle_review_output(
         pr_number: Pull request number.
         review_path: Absolute path to the expected ``review.json`` file.
         agent_name: Human-readable agent name used in log prefixes.
+
+    Returns:
+        The parsed review dict (containing at minimum ``state`` and ``body``)
+        on success, or ``None`` when the file is absent or malformed.
     """
     try:
         with open(review_path) as f:
@@ -699,6 +712,7 @@ def _handle_review_output(
 
         vcs.post_review(repo, pr_number, data["body"], data["state"])
         logger.info("[%s] review posted for pr=#%d state=%s", agent_name, pr_number, data["state"])
+        return data
 
     except (FileNotFoundError, json.JSONDecodeError, ValueError, KeyError) as exc:
         logger.error(
@@ -712,3 +726,4 @@ def _handle_review_output(
             logger.exception(
                 "[%s] could not apply human:review label to pr=#%d", agent_name, pr_number
             )
+        return None

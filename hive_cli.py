@@ -66,9 +66,21 @@ def cmd_run(args):
 
     # 2. Build dependency graph
     issue_map = {i["number"]: i for i in issues}
-    deps = {}  # number -> list of numbers it depends on
+    deps = {}  # number -> list of numbers it depends on (deduplicated)
     for number in issue_map:
-        deps[number] = vcs.get_issue_dependencies(repo, number)
+        raw_deps = vcs.get_issue_dependencies(repo, number)
+        # Deduplicate while preserving order: duplicate edges would inflate the
+        # in-degree counter (incremented once per duplicate) but the decrement
+        # during Kahn's walk only fires once per occurrence in deps[m], causing
+        # a false "circular dependency" abort for issues with repeated Depends-on
+        # references.
+        seen_deps: set[int] = set()
+        deduped: list[int] = []
+        for d in raw_deps:
+            if d not in seen_deps:
+                seen_deps.add(d)
+                deduped.append(d)
+        deps[number] = deduped
 
     # 3. Topological sort (Kahn's algorithm)
     in_degree = {n: 0 for n in issue_map}
@@ -101,6 +113,9 @@ def cmd_run(args):
     cody_yaml = os.path.join(agents_dir, "cody.yaml")
     reven_yaml = os.path.join(agents_dir, "reven.yaml")
 
+    # Maximum number of Cody rework passes per PR before escalating to a human.
+    _MAX_REWORK_ATTEMPTS = 3
+
     # 5. Execute per issue
     for number in order:
         issue = issue_map[number]
@@ -115,7 +130,7 @@ def cmd_run(args):
             "github_token": token,
         }
 
-        # Run Cody (developer agent)
+        # Run Cody (developer agent) — initial implementation pass.
         agent_runner.run(cody_yaml, context)
 
         # Poll for the PR Cody opened — branches are named agent/issue-{N}-*
@@ -124,18 +139,73 @@ def cmd_run(args):
             print(f"[hive run] WARNING: No PR found for issue #{number} after polling. Skipping Reven.")
             continue
 
-        # Run Reven (reviewer agent)
-        pr_context = {
-            "repo_full_name": repo,
-            "pr_number": pr["number"],
-            "pr_title": pr["title"],
-            "pr_body": pr.get("body", "") or "",
-            "head_branch": pr["head"]["ref"],
-            "base_branch": pr["base"]["ref"],
-            "review_body": "",
-            "github_token": token,
-        }
-        agent_runner.run_for_pr(reven_yaml, pr_context, vcs)
+        pr_number = pr["number"]
+        rework_attempts = 0
+
+        # Rework loop: run Reven, then re-queue Cody on changes_requested,
+        # up to _MAX_REWORK_ATTEMPTS times before escalating to a human.
+        while True:
+            pr_context = {
+                "repo_full_name": repo,
+                "pr_number": pr_number,
+                "pr_title": pr["title"],
+                "pr_body": pr.get("body", "") or "",
+                "head_branch": pr["head"]["ref"],
+                "base_branch": pr["base"]["ref"],
+                "review_body": "",
+                "github_token": token,
+            }
+            review = agent_runner.run_for_pr(reven_yaml, pr_context, vcs)
+
+            review_state = (review or {}).get("state", "")
+
+            if review_state == "approved":
+                print(f"[hive run] PR #{pr_number} approved by Reven.")
+                break
+
+            if review_state == "changes_requested":
+                rework_attempts += 1
+                if rework_attempts >= _MAX_REWORK_ATTEMPTS:
+                    print(
+                        f"[hive run] PR #{pr_number} still needs changes after "
+                        f"{_MAX_REWORK_ATTEMPTS} rework attempts — applying human:review label."
+                    )
+                    try:
+                        vcs.apply_label(repo, pr_number, "human:review")
+                    except Exception as exc:
+                        print(
+                            f"[hive run] WARNING: could not apply human:review label "
+                            f"to PR #{pr_number}: {exc}",
+                            file=sys.stderr,
+                        )
+                    break
+
+                review_body = (review or {}).get("body", "")
+                print(
+                    f"[hive run] PR #{pr_number} needs rework "
+                    f"(attempt {rework_attempts}/{_MAX_REWORK_ATTEMPTS}). Re-queuing Cody."
+                )
+                cody_rework_context = {
+                    "repo_full_name": repo,
+                    "pr_number": pr_number,
+                    "pr_title": pr["title"],
+                    "pr_body": pr.get("body", "") or "",
+                    "head_branch": pr["head"]["ref"],
+                    "base_branch": pr["base"]["ref"],
+                    "review_body": (
+                        f"REVIEW FEEDBACK (rework attempt {rework_attempts}):\n{review_body}"
+                    ),
+                    "github_token": token,
+                }
+                agent_runner.run_for_pr(cody_yaml, cody_rework_context, vcs)
+                continue
+
+            # Any other state (no review produced, "commented", etc.) — move on.
+            print(
+                f"[hive run] PR #{pr_number}: no actionable review outcome "
+                f"(state={review_state!r}). Moving on."
+            )
+            break
 
         print(f"[hive run] Issue #{number} complete.")
 
