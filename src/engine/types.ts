@@ -4,19 +4,24 @@ export const EVENT_SCHEMA_VERSION = 1 as const;
 
 export type TerminalReason = "completed" | "max_turns" | "error";
 
+/**
+ * Every event may carry `raw`: the backend's original wire line. The engine
+ * writes it to run.log verbatim (instead of a structured record).
+ */
 export type AgentEvent =
-  | { schemaVersion: 1; type: "session_started"; sessionId: string }
+  | { schemaVersion: 1; type: "session_started"; sessionId: string; raw?: string }
   /** Backend raw message; opaque to the engine, but counts as activity. */
-  | { schemaVersion: 1; type: "activity"; payload: unknown }
+  | { schemaVersion: 1; type: "activity"; payload: unknown; raw?: string }
   | {
       schemaVersion: 1;
       type: "result";
+      raw?: string;
       sessionId: string;
       terminalReason: TerminalReason;
       isError: boolean;
       payload: unknown;
     }
-  | { schemaVersion: 1; type: "error"; message: string; payload?: unknown };
+  | { schemaVersion: 1; type: "error"; message: string; payload?: unknown; raw?: string };
 
 export interface SessionRequest {
   systemPrompt: string;

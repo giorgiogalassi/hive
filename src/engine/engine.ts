@@ -59,6 +59,14 @@ export async function runAgent(config: AgentConfig, target: RunTarget, deps: Eng
     }
   };
 
+  /** Appends a backend line to run.log exactly as received. */
+  const emitRaw = (raw: string) => {
+    (deps.log ?? ((l: string) => process.stderr.write(`${l}\n`)))(`${prefix}[claude] ${raw.trimEnd()}`);
+    if (!logPath) return;
+    const p = logPath;
+    chain = chain.then(() => appendFile(p, raw.endsWith("\n") ? raw : `${raw}\n`).catch(() => undefined));
+  };
+
   let needsSalvage = false;
   let failed = false;
   let baseSha: string | null = null;
@@ -195,7 +203,9 @@ export async function runAgent(config: AgentConfig, target: RunTarget, deps: Eng
         if (step.done) break;
         const ev = step.value;
         idleDeadline = Date.now() + idleMs;
-        emit("event", ev.type, ev);
+        if (ev.raw !== undefined) {
+          emitRaw(ev.raw);
+        } else emit("event", ev.type, ev);
         if (ev.type === "session_started") onSession(ev.sessionId);
         else if (ev.type === "result") {
           end = { kind: "result", result: ev };
