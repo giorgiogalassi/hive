@@ -68,6 +68,13 @@ export interface PullRequestSummary {
   author: string;
 }
 
+export interface SubmittedReview {
+  id: number;
+  state: ReviewState;
+  body: string;
+  author: string;
+}
+
 /** Thrown when the provider answers with a non-2xx status. */
 export class VcsHttpError extends Error {
   readonly status: number;
@@ -115,4 +122,6 @@ export interface VcsPort {
   /** Sub-issues first, then `Depends-on: #N` body parsing; deduplicated. */
   getIssueDependencies(repo: string, number: number): Promise<number[]>;
   listOpenPullRequests(repo: string): Promise<PullRequestSummary[]>;
+  /** Most recent submitted (non-pending, non-dismissed) review on a PR, or null when none. */
+  getLatestReview(repo: string, prNumber: number): Promise<SubmittedReview | null>;
 }

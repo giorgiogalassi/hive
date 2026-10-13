@@ -16,6 +16,7 @@ import {
   type NormalizedEvent,
   type PullRequestSummary,
   type ReviewState,
+  type SubmittedReview,
   type VcsPort,
 } from "./port.js";
 
@@ -223,6 +224,26 @@ export class GitHubAdapter implements VcsPort {
       baseBranch: pr["base"].ref,
       author: pr["user"]?.login ?? "",
     }));
+  }
+
+  async getLatestReview(repo: string, prNumber: number): Promise<SubmittedReview | null> {
+    const items = await this.paginate(
+      `${GITHUB_API}/repos/${repo}/pulls/${prNumber}/reviews?per_page=100`,
+    );
+    // The API lists reviews oldest first.
+    for (const r of items.reverse()) {
+      const state: ReviewState | null =
+        r["state"] === "APPROVED"
+          ? "approved"
+          : r["state"] === "CHANGES_REQUESTED"
+            ? "changes_requested"
+            : r["state"] === "COMMENTED"
+              ? "commented"
+              : null;
+      if (state === null) continue;
+      return { id: r["id"], state, body: r["body"] ?? "", author: r["user"]?.login ?? "" };
+    }
+    return null;
   }
 
   // -- issues --------------------------------------------------------------
