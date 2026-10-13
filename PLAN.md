@@ -443,3 +443,14 @@ agent runs remotely, PR opens.
 4. Add `human:review` label on unrecoverable failure
 5. Rename `agent:review` on issues to `agent:analyze`
 6. Implement `hive run --project` batch command with topological sort over issue dependencies
+
+---
+
+## Engine track (TypeScript rewrite)
+
+The Python implementation described in the phases above is being replaced by a TypeScript codebase (webhook receiver, CLI, rework loop, VCS port, engine). Decisions and rationale live in the PRD (`prd/archive/current-20261013-092744.md` in the project vault) and the project `decisions.md`; this section only points at them.
+
+- **Seams:** `WorkspacePort` (clone, branch, checkpoint commit, salvage) and `AgentSession` (one agent invocation: prompt in, normalized event stream plus session id out). The engine owns the iteration/resume loop, idle and overall timeouts, and the `max_turns` -> checkpoint -> resume sequence; dispatch, the rework loop and the entry points never call a backend or git directly.
+- **Backends:** `runner: claude-code` (Claude Code CLI shell-out, stream-json; port of the Python path) and `runner: claude-agent-sdk` (Claude Agent SDK, which itself wraps a Claude Code subprocess). Codex is dropped. Credential rule: `ANTHROPIC_API_KEY` wins, `CLAUDE_CODE_OAUTH_TOKEN` is a personal-use fallback.
+- **Sequencing:** (1) dispatch unification, (2) TypeScript codebase with only the CLI backend, (3) failure-path checklist (`docs/failure-path-checklist.md`) walked against the CLI backend, (4) SDK backend, (5) checklist walked against the SDK backend, (6) Python deletion after tagging the last Python commit. The SDK backend must not land before step 3 passes.
+- **Container and docs:** Docker and the README target the TypeScript receiver; `hive/` stays in the tree until step 6. Real end-to-end runs (webhook to PR to review, `hive run`) and the Docker image check are pending human verification.

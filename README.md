@@ -1,177 +1,189 @@
 # Hive
 
-A personal tool to deploy agents remotely and activate them via external triggers (GitHub webhooks, issue labels, etc.).
+A personal tool to run AI coding agents against GitHub issues and PRs, triggered by labels and comments (via a webhook receiver or the `hive run` CLI).
 
-Primary use case: add the label `agent:develop` to a GitHub issue, a remote agent reads it, implements the change, and opens a PR for human review. No manual intervention between trigger and result.
+Primary use case: add the label `agent:develop` to a GitHub issue, a remote agent reads it, implements the change and opens a PR for review.
+
+> Status: the TypeScript rewrite is the documented path. The Python package under `hive/` still exists in the tree but is neither documented nor containerised any more. Nothing in this README has been verified end-to-end yet; real webhook and `hive run` runs against GitHub, and the Docker image, are pending a human check.
 
 ---
 
 ## How it works
 
 ```
-Label added on GitHub issue
-        ↓
-Hive receives the webhook (FastAPI)
-        ↓
-Verifies HMAC-SHA256 signature
-        ↓
-Loads the matching agent YAML
-        ↓
-Clones the repo into a temp workdir
-        ↓
-Invokes the agent runtime (claude --print ...)
-        ↓
-Agent posts result back to GitHub via curl
+Label added / comment posted on GitHub
+        |
+Hono webhook receiver (POST /webhook)        hive run --project <label>
+        |  verifies HMAC-SHA256 signature            |
+        +---------------- HiveEvent -----------------+
+                            |
+                  unified dispatch (rework loop, in-flight dedup)
+                            |
+         loads agents/<name>.yaml, clones the repo into a temp workdir
+                            |
+         engine: iteration / resume loop, idle + overall timeouts,
+         checkpoint commits, salvage
+                            |
+         agent runner: claude-code (CLI)  |  claude-agent-sdk
+                            |
+         agent pushes a branch, opens a PR, posts comments via GitHub
 ```
+
+The webhook and `hive run` share the same dispatch function, so a label behaves identically whichever way it arrives.
 
 ---
 
 ## Project structure
 
 ```
-hive/
-  agents/                     agent YAML definitions
-  runner/
-    main.py                   FastAPI app + webhook receiver
-    agent_runner.py           loads YAML, clones repo, invokes CLI runner
-  Dockerfile
-  docker-compose.yml
-  .env.example
+src/
+  agents/       YAML loader and schema validation
+  backends/     agent runners (claude-code CLI shell-out; claude-agent-sdk)
+  cli/          Commander CLI (run, list; deploy/remove are stubs), layered .env
+  dispatch/     HiveEvent, dispatch, rework loop, in-flight dedup
+  engine/       iteration loop, idle detection, event schema, backend registry
+  runtime/      shared DispatchDeps factory
+  vcs/          VcsPort and GitHub adapter
+  webhook/      Hono app and entry point
+  workspace/    git workspace (clone, branch, checkpoint, salvage)
+agents/         agent YAML definitions (authoritative)
+Dockerfile  docker-compose.yml  .env.example
+hive/           legacy Python implementation (not documented, not containerised)
 ```
 
 ---
 
 ## Requirements
 
-- Docker + Docker Compose
-- A GitHub repo with webhook access
-- Claude Code CLI credentials (`claude setup-token`)
+- Node.js 24 and pnpm 10 (pnpm is pinned in `package.json`; `corepack enable` provides it)
+- `git` on PATH
+- The Claude Code CLI on PATH for `runner: claude-code` (`npm install -g @anthropic-ai/claude-code`)
+- A GitHub repo with webhook access and a token (see Environment variables)
+- An Anthropic credential (see Credentials)
+- Docker + Docker Compose, only if you run the receiver in a container
 
-For local tunnel testing:
-- Node.js (for `npx localtunnel`)
+Python is not required.
 
 ---
 
 ## Install
 
-**Global install (CLI only)**
-
-Install the `hive` CLI globally with `pipx` so it is available from any project directory:
-
 ```bash
-pipx install .
+corepack enable
+pnpm install
+pnpm build
 ```
 
-Or with plain pip into a virtual environment:
+To get the `hive` command on your PATH:
 
 ```bash
-pip install .
+pnpm link --global
+hive --help
 ```
 
-This exposes the `hive` command. Run `hive --help` to confirm.
+Without linking, use `node dist/cli/index.js <command>`.
 
 ---
 
 ## Setup
 
-**1. Clone and configure environment**
+**1. Configure the environment**
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` and fill in:
+Fill in at least:
 
 ```
 GITHUB_WEBHOOK_SECRET=your-secret-here
 GITHUB_TOKEN=your-github-pat
-CLAUDE_CODE_OAUTH_TOKEN=<output of: claude setup-token>
+GITHUB_OWNER=your-github-username
+ANTHROPIC_API_KEY=your-anthropic-key
 ```
 
-**2. Start the stack**
+**2. Start the receiver**
+
+With Docker (listens on port 8000, reads `.env` through Compose `env_file`):
 
 ```bash
 docker compose up --build
 ```
 
-The app starts on `http://localhost:8000`.
+Or locally:
 
-**3. Expose localhost via localtunnel**
+```bash
+node --env-file=.env dist/webhook/main.js   # built; loads .env
+pnpm start                                  # same entry, variables must already be in the shell
+pnpm dev                                    # tsx, no build step
+```
+
+The receiver refuses to start without `GITHUB_WEBHOOK_SECRET`. `PORT` defaults to 8000.
+
+**3. Expose localhost**
 
 ```bash
 npx localtunnel --port 8000
 ```
 
-This prints a public HTTPS URL (e.g. `https://fast-ears-rest.loca.lt`). Copy it.
-
-> The URL changes every time localtunnel restarts. Update the GitHub webhook URL when that happens. For a stable URL, use a VPS (Phase 5).
+This prints a public HTTPS URL. The URL changes whenever the tunnel restarts; update the GitHub webhook when that happens.
 
 **4. Configure the GitHub webhook**
 
-Go to your repo → Settings → Webhooks → Add webhook:
+Repo -> Settings -> Webhooks -> Add webhook:
 
 | Field | Value |
 |---|---|
-| Payload URL | `https://your-tunnel-url.loca.lt/webhook` |
+| Payload URL | `https://your-tunnel-url/webhook` |
 | Content type | `application/json` |
-| Secret | same value as `GITHUB_WEBHOOK_SECRET` in `.env` |
-| Events | Issues (at minimum) |
+| Secret | same value as `GITHUB_WEBHOOK_SECRET` |
+| Events | Issues, Pull requests, Issue comments, Pull request reviews |
+
+A request with a missing or invalid `X-Hub-Signature-256` gets 401; a valid one gets 200.
 
 **5. Trigger an agent**
 
-Apply the label `agent:develop` to any issue. The agent will clone the repo, implement the change, and open a PR within ~60 seconds.
+Apply the label `agent:develop` to an issue. The run continues in the background after the webhook responds.
 
 ---
 
-## `hive run` — batch execution
-
-Run all open issues carrying a given label in dependency order:
+## `hive run` - batch execution
 
 ```bash
 hive run --project <label>
-```
-
-Fetches every open issue with `<label>`, resolves the dependency order that Chisel wrote at issue-creation time, and executes Cody → Reven per issue sequentially. No LLM orchestrator at runtime — deterministic loop.
-
-```bash
-# Run all issues labelled "my-feature" in the current repo
-hive run --project my-feature
-
-# Target a specific repository
 hive run --project my-feature --repo owner/repo
 ```
 
-**Repository resolution order:**
+Fetches every open issue carrying `<label>`, resolves the dependency order written at issue-creation time (a first-line `Blocked by:`), and runs Cody then Reven per issue, sequentially, through the same dispatch as the webhook. There is no LLM orchestrator at runtime.
 
-1. `--repo` flag (per-invocation override)
+`GITHUB_TOKEN` is required. Repository resolution order:
+
+1. `--repo` flag
 2. `GITHUB_REPO` environment variable
-3. `git remote get-url origin` (auto-detected from the current directory)
+3. `git remote get-url origin` of the current directory
+
+Other commands: `hive list`. `hive deploy` and `hive remove` are stubs that exit 0.
 
 **Machine-level secrets (recommended one-time setup):**
 
 ```bash
 mkdir -p ~/.hive
-cat > ~/.hive/.env << 'EOF'
-GITHUB_TOKEN=ghp_your_token_here
-CLAUDE_CODE_OAUTH_TOKEN=your_oauth_token_here
-EOF
+printf 'GITHUB_TOKEN=ghp_your_token_here\nANTHROPIC_API_KEY=your_key_here\n' > ~/.hive/.env
 chmod 600 ~/.hive/.env
 ```
 
-With this in place, `hive run --project my-label` works from any project directory without exporting tokens in the shell.
-
 ---
 
-## Label model (Phase 4)
+## Label model
 
-Labels are owned by the orchestrator except for the two manual entry points. Humans never apply labels mid-flow to steer — that's what PR comments are for.
+Labels are owned by the orchestrator except for the manual entry points. Steering mid-flight happens through PR comments, not labels.
 
 | Label | Applied by | Meaning |
 |---|---|---|
-| `agent:analyze` | Human (manual) | Analyze an issue before deciding to develop |
-| `agent:develop` | Human (manual) | Implement a single issue (Cody) |
-| `agent:review` | Orchestrator | Reven reviews the PR (auto-applied after Cody opens it) |
-| `human:review` | Orchestrator | Agent failed unrecoverably — human must inspect logs |
+| `agent:analyze` | Human | Analyze an issue before deciding to develop |
+| `agent:develop` | Human | Implement a single issue (Cody) |
+| `agent:review` | Orchestrator | Reven reviews the PR (applied after Cody opens it) |
+| `human:review` | Orchestrator | Agent failed unrecoverably; a human must inspect logs |
 
 ---
 
@@ -179,10 +191,14 @@ Labels are owned by the orchestrator except for the two manual entry points. Hum
 
 ```yaml
 name: issue-reviewer
-runner: claude-code          # claude-code | codex
+runner: claude-code          # claude-code | claude-agent-sdk
 model:
   provider: anthropic
   name: claude-sonnet-4-6
+  max_turns: 20
+  max_iterations: 1
+  timeout: 900
+  idle_timeout: 300
 triggers:
   - type: github-label
     label: "agent:analyze"
@@ -190,13 +206,23 @@ system_prompt: |
   You are a senior software engineer...
 ```
 
-Add new agents by dropping a `.yaml` file in `agents/`. The label-to-agent mapping lives in `runner/main.py`:
+Add an agent by dropping a `.yaml` file in `agents/`. Any `runner` value other than the two above fails at load, listing the known ones.
 
-```python
-# agent:analyze  →  issue-reviewer.yaml
-# agent:develop  →  cody.yaml
-# agent:review   →  reven.yaml  (applied automatically by the orchestrator)
-```
+- `claude-code`: spawns the Claude Code CLI (`claude --print --output-format stream-json`) and resumes sessions with `--resume`.
+- `claude-agent-sdk`: uses `@anthropic-ai/claude-agent-sdk`. The SDK wraps a Claude Code subprocess (a bundled binary, overridable with `HIVE_CLAUDE_CODE_PATH`); it does not remove the subprocess. This is the second runner and lands in a separate step from the CLI backend, so it may not be available in your checkout yet.
+
+The engine owns the iteration loop, idle and overall timeouts and checkpoint commits for both, so `max_turns` is a per-iteration valve and `max_iterations` is what bounds a long task.
+
+---
+
+## Credentials
+
+Hive passes exactly one Anthropic credential to the agent process, for either runner:
+
+1. If `ANTHROPIC_API_KEY` is set, it is used and `CLAUDE_CODE_OAUTH_TOKEN` is stripped from the child environment.
+2. Otherwise `CLAUDE_CODE_OAUTH_TOKEN` is used.
+
+`ANTHROPIC_API_KEY` is the default, and the credential to use for the SDK backend. `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) is a personal-use option only; do not rely on it for shared or unattended deployments. `GITHUB_TOKEN` is injected into the agent environment as well.
 
 ---
 
@@ -204,97 +230,55 @@ Add new agents by dropping a `.yaml` file in `agents/`. The label-to-agent mappi
 
 | Variable | Required | Description |
 |---|---|---|
-| `GITHUB_WEBHOOK_SECRET` | Yes (Docker/webhook) | HMAC secret shared with GitHub webhook |
-| `GITHUB_TOKEN` | Yes | PAT for cloning repos and posting comments |
-| `CLAUDE_CODE_OAUTH_TOKEN` | For `runner: claude-code` | Obtained via `claude setup-token` |
-| `OPENAI_API_KEY` | For `runner: codex` | OpenAI key for Codex runner |
-| `GITHUB_OWNER` | Yes (CLI) | GitHub username of the repo owner |
-| `GITHUB_REPO` | No | Target repo in `owner/repo` format (auto-detected if unset) |
+| `GITHUB_WEBHOOK_SECRET` | Webhook receiver | HMAC secret shared with the GitHub webhook |
+| `GITHUB_TOKEN` | Yes | PAT: clone, push, comments, labels, PRs, reviews. Needs write on Contents, Issues and Pull requests |
+| `ANTHROPIC_API_KEY` | Yes, unless OAuth token set | Default Anthropic credential; wins over the OAuth token |
+| `CLAUDE_CODE_OAUTH_TOKEN` | No | Personal-use alternative; used only when `ANTHROPIC_API_KEY` is unset |
+| `HIVE_CLAUDE_CODE_PATH` | No | Claude Code executable for the SDK backend, overriding the bundled binary (read once the SDK backend lands) |
+| `GITHUB_OWNER` | Yes | GitHub username of the repo owner; identifies owner comments that re-queue Cody |
+| `GITHUB_REPO` | No | Target repo for `hive run` in `owner/repo` form (auto-detected if unset) |
+| `PORT` | No | Receiver port (default 8000) |
 
 ---
 
 ## Layered env resolution (CLI)
 
-The `hive` CLI is installed globally (via `pipx`) and runs from arbitrary project directories, so it uses a three-layer env resolution strategy instead of relying on a single `.env` location.
-
-**Priority order (highest → lowest):**
+The `hive` CLI runs from arbitrary project directories, so it resolves variables in layers.
 
 | Layer | Source | Typical contents |
 |---|---|---|
-| 1 | `os.environ` / shell exports | CI secrets, manually exported vars — **always win** |
-| 2 | `.env` in the current working directory | Per-project config: `GITHUB_OWNER`, `GITHUB_REPO` |
-| 3 | `~/.hive/.env` | Machine-level secrets: `GITHUB_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` |
+| 1 (wins) | process environment / shell exports | CI secrets, manual exports |
+| 2 | `.env` in the current working directory | `GITHUB_OWNER`, `GITHUB_REPO` |
+| 3 | `~/.hive/.env` | `GITHUB_TOKEN`, `ANTHROPIC_API_KEY` |
 
-Values already present in `os.environ` are **never overwritten** by either file. A variable in the cwd `.env` takes precedence over the same variable in `~/.hive/.env`. Both files are optional; missing files are silently skipped.
+Existing values are never overwritten by a file, and a cwd `.env` beats `~/.hive/.env`. Missing files are skipped.
 
-> **Docker / Compose:** The webhook server reads the repo-root `.env` via `env_file` in `docker-compose.yml` and is **not** affected by this layering.
+> The webhook receiver does not layer. Under Docker it reads the repo-root `.env` via `env_file`; locally it reads the process environment.
 
 ---
 
-## Development phases
+## Development
 
-| Phase | Status | Description |
-|---|---|---|
-| 1 | Done | Webhook receiver — receive, verify, log |
-| 2 | Done | `issue-reviewer` agent — `agent:analyze` triggers analysis comment |
-| 3 | Done | `issue-developer` → replaced by Cody (`agent:develop` triggers branch + PR) |
-| 4 | Done | Agent integration (Cody + Reven), `hive run` batch command, comment-driven rework |
-| 5 | Planned | VPS deploy (Hetzner) — stable public URL, no localtunnel |
+```bash
+pnpm dev       # receiver via tsx
+pnpm build     # tsc
+pnpm test      # vitest
+```
+
+Engine design and sequencing: see the "Engine track" section of `PLAN.md`.
 
 ---
 
 ## Debugging
 
-**Follow live logs**
-
 ```bash
-docker compose logs -f
+docker compose logs -f                     # follow logs
+docker compose logs --tail 50              # recent logs
+docker compose exec app bash               # shell in the container
+docker compose exec app claude --version   # CLI present?
+docker compose exec app claude --print "say hello in one sentence"   # credential works?
+docker compose exec app ps aux             # running processes
+docker compose down && docker compose up --build   # clean rebuild
 ```
 
-**Check recent logs (last 50 lines)**
-
-```bash
-docker logs hive-app-1 --tail 50
-```
-
-**Open a shell inside the container**
-
-```bash
-docker exec -it hive-app-1 bash
-```
-
-**Verify claude CLI is authenticated**
-
-```bash
-docker exec hive-app-1 claude --print "say hello in one sentence"
-```
-
-**Run claude manually with a model and system prompt (no TTY)**
-
-```bash
-docker exec hive-app-1 claude --print --model claude-sonnet-4-6 --system-prompt "Be concise." "List files in the current directory"
-```
-
-**Inspect a running container's processes**
-
-```bash
-docker exec hive-app-1 ps aux
-```
-
-**List all running containers**
-
-```bash
-docker ps
-```
-
-**Rebuild and restart cleanly**
-
-```bash
-docker compose down && docker compose up --build
-```
-
-**Rebuild in background**
-
-```bash
-docker compose up --build -d
-```
+Each run writes a structured `run.log` (backend payloads nested under `extra`).
