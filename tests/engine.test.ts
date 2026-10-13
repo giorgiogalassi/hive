@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentConfig } from "../src/agents/loader.js";
 import { BackendRegistry, runAgent } from "../src/engine/index.js";
 import type { AgentEvent, AgentSession, RunTarget, SessionRequest, WorkspacePort } from "../src/engine/index.js";
-import { VcsHttpError } from "../src/vcs/port.js";
+import { BOT_MARKER, VcsHttpError } from "../src/vcs/port.js";
 import type { VcsPort } from "../src/vcs/port.js";
 
 const ev = {
@@ -180,6 +180,20 @@ describe("engine", () => {
     expect(pushed.ws.salvages).toBe(1);
     expect(pushed.out.salvaged).toBe(true);
     expect(pushed.vcs.comments[0]).toContain("partial progress");
+    expect(pushed.vcs.comments[0]).toContain(BOT_MARKER);
+  });
+
+  it("marks the failure comment with the bot marker", async () => {
+    const session: AgentSession = {
+      async start() {
+        throw new Error("backend down");
+      },
+    };
+    const { deps, vcs } = setup(session);
+    await runAgent(config(), issue, deps);
+    expect(vcs.comments).toHaveLength(1);
+    expect(vcs.comments[0]).toContain("encountered an error");
+    expect(vcs.comments[0]).toContain(BOT_MARKER);
   });
 
   it("applies human:review without salvage when postReview throws an HTTP error", async () => {

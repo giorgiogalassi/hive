@@ -233,4 +233,21 @@ describe("getPrDiff", () => {
     expect(path).toBe(join(dir, "diff.patch"));
     expect(await readFile(path, "utf8")).toContain("+hello");
   });
+
+  it("getPullRequest maps title, body and branches inside the adapter", async () => {
+    const fetchFn = vi.fn(async () =>
+      json({ number: 4, title: "t", body: null, head: { ref: "h" }, base: { ref: "m" }, user: { login: "u" } }),
+    );
+    expect(await adapter(fetchFn as unknown as typeof fetch).getPullRequest("o/r", 4)).toEqual({
+      number: 4, title: "t", body: "", headBranch: "h", baseBranch: "m", author: "u",
+    });
+  });
+
+  it("parseEvent returns null instead of throwing when required fields are missing", () => {
+    expect(parse("issues", { action: "labeled", repository: { full_name: "o/r" } })).toBeNull();
+    expect(parse("pull_request", { action: "opened", pull_request: { number: 1 } })).toBeNull();
+    expect(parse("pull_request_review", { action: "submitted", pull_request: { number: 1 }, review: {} })).toBeNull();
+    expect(parse("issue_comment", { action: "created", issue: { number: 1 }, comment: {} })).toBeNull();
+  });
+
 });

@@ -40,10 +40,14 @@ export class ReworkLoop {
     return "ignore";
   }
 
-  /** Owner comments always requeue once a first review exists, regardless of the run count. */
+  /**
+   * Owner comments requeue once a first review exists and share the review cap
+   * (deliberate deviation from Python, where they were uncapped).
+   */
   onOwnerComment(repo: string, prNumber: number): LoopDecision {
     const s = this.get(repo, prNumber);
     if (!s.firstReviewPosted) return "ignore";
+    if (s.codyRuns >= MAX_CODY_RUNS) return "human_review";
     s.codyRuns += 1;
     return "requeue";
   }

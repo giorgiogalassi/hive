@@ -1,6 +1,7 @@
 import { appendFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentConfig } from "../agents/loader.js";
+import { BOT_MARKER } from "../vcs/port.js";
 import type { VcsPort } from "../vcs/port.js";
 import { buildChildEnv } from "./env.js";
 import { CONTINUE_PROMPT, buildPrUserMessage, buildUserMessage } from "./prompts.js";
@@ -149,7 +150,7 @@ export async function runAgent(config: AgentConfig, target: RunTarget, deps: Eng
       await vcs.postComment(
         target.repo,
         number,
-        `**Hive agent \`${agent}\` encountered an error.**\n\nThe run failed before completing. Check the container logs for details.`,
+        `**Hive agent \`${agent}\` encountered an error.**\n\nThe run failed before completing. Check the container logs for details.\n\n${BOT_MARKER}`,
       );
     } catch {
       emit("warn", "could not post failure comment");
@@ -235,7 +236,7 @@ export async function runAgent(config: AgentConfig, target: RunTarget, deps: Eng
       await vcs.postComment(
         target.repo,
         number,
-        `**Hive agent \`${agent}\` did not finish**, but partial progress was pushed to \`${branch}\` before the run ended. Review and continue manually if useful.`,
+        `**Hive agent \`${agent}\` did not finish**, but partial progress was pushed to \`${branch}\` before the run ended. Review and continue manually if useful.\n\n${BOT_MARKER}`,
       );
     } catch {
       emit("warn", "could not post salvage comment");

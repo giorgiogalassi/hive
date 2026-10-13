@@ -14,6 +14,7 @@ import {
   VcsTimeoutError,
   type Issue,
   type NormalizedEvent,
+  type PullRequestDetails,
   type PullRequestSummary,
   type ReviewState,
   type SubmittedReview,
@@ -79,6 +80,18 @@ export class GitHubAdapter implements VcsPort {
   // -- webhook parsing -----------------------------------------------------
 
   parseEvent(
+    headers: Record<string, string | undefined>,
+    rawBody: string | Uint8Array,
+  ): NormalizedEvent | null {
+    try {
+      return this.parseEventUnsafe(headers, rawBody);
+    } catch {
+      // A payload missing required fields is not an event we understand.
+      return null;
+    }
+  }
+
+  private parseEventUnsafe(
     headers: Record<string, string | undefined>,
     rawBody: string | Uint8Array,
   ): NormalizedEvent | null {
@@ -224,6 +237,19 @@ export class GitHubAdapter implements VcsPort {
       baseBranch: pr["base"].ref,
       author: pr["user"]?.login ?? "",
     }));
+  }
+
+  async getPullRequest(repo: string, prNumber: number): Promise<PullRequestDetails> {
+    const res = await this.request("GET", `${GITHUB_API}/repos/${repo}/pulls/${prNumber}`);
+    const pr = (await res.json()) as Json;
+    return {
+      number: pr["number"],
+      title: pr["title"] ?? "",
+      body: pr["body"] ?? "",
+      headBranch: pr["head"]?.ref ?? "",
+      baseBranch: pr["base"]?.ref ?? "",
+      author: pr["user"]?.login ?? "",
+    };
   }
 
   async getLatestReview(repo: string, prNumber: number): Promise<SubmittedReview | null> {

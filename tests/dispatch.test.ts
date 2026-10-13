@@ -5,6 +5,7 @@ import type { AgentConfig } from "../src/agents/loader.js";
 import { ReworkLoop, dispatch, toHiveEvent } from "../src/dispatch/index.js";
 import type { DispatchDeps, HiveEvent } from "../src/dispatch/index.js";
 import type { RunTarget } from "../src/engine/types.js";
+import { BOT_MARKER } from "../src/vcs/port.js";
 import type { VcsPort } from "../src/vcs/port.js";
 
 function setup(over: Partial<DispatchDeps> = {}, hasLabel = false) {
@@ -16,6 +17,9 @@ function setup(over: Partial<DispatchDeps> = {}, hasLabel = false) {
   const vcs = {
     getIssue: async () => ({ number: 1, title: "T", body: "B" }),
     hasLabel: async () => hasLabel,
+    getPullRequest: async () => ({
+      number: 5, title: "PT", body: "PB", headBranch: "feat", baseBranch: "main", author: "a",
+    }),
     applyLabel: async (_r: string, n: number, l: string) => void labels.push(`${n}:${l}`),
   } as unknown as VcsPort;
   const deps: DispatchDeps = {
@@ -130,6 +134,61 @@ describe("dispatch", () => {
     };
     await dispatch({ type: "issue_labeled", repo: "o/r", issueNumber: 1, label: "agent:develop" }, t.deps);
     expect(t.runs[0]?.target).toMatchObject({ title: "", body: "" });
+  });
+});
+
+describe("review fixes", () => {
+  it("ignores comments carrying the bot marker even from the owner", async () => {
+    const t = setup();
+    await dispatch(review("approved"), t.deps);
+    await dispatch({ ...comment("owner"), body: `failed\n\n${BOT_MARKER}` } as HiveEvent, t.deps);
+    expect(t.runs).toHaveLength(0);
+    expect(t.deps.loop?.get("o/r", 5).codyRuns).toBe(0);
+  });
+
+  it("owner comments share the 3-run cap and escalate to human:review", async () => {
+    const t = setup();
+    await dispatch(review("approved"), t.deps);
+    for (let i = 0; i < 3; i++) await dispatch(comment("owner"), t.deps);
+    expect(t.runs).toHaveLength(3);
+    const res = await dispatch(comment("owner"), t.deps);
+    expect(res.started).toBe(false);
+    expect(t.runs).toHaveLength(3);
+    expect(t.labels).toEqual(["5:human:review"]);
+  });
+
+  it("fills branch, title and body for review_submitted, pr_comment and pr_labeled runs", async () => {
+    const t = setup();
+    await dispatch(review("changes_requested"), t.deps);
+    await dispatch(comment("owner"), t.deps);
+    await dispatch({ type: "pr_labeled", repo: "o/r", prNumber: 5, label: "agent:review" }, t.deps);
+    expect(t.runs).toHaveLength(3);
+    for (const r of t.runs) {
+      expect(r.target).toMatchObject({ title: "PT", body: "PB", headBranch: "feat", baseBranch: "main" });
+    }
+  });
+
+  it("falls back to empty PR values and logs when getPullRequest fails", async () => {
+    const t = setup();
+    (t.deps.vcs as unknown as { getPullRequest: () => Promise<never> }).getPullRequest = async () => {
+      throw new Error("boom");
+    };
+    await dispatch(review("changes_requested"), t.deps);
+    expect(t.runs[0]?.target).toMatchObject({ title: "", body: "", headBranch: "", baseBranch: "", reviewBody: "fix it" });
+    expect(t.logs.some((l) => l.includes("could not fetch PR"))).toBe(true);
+  });
+
+  it("a review or owner comment dropped as in-flight does not consume a rework slot", async () => {
+    const t = setup({ runMode: "background" });
+    await dispatch(review("approved"), t.deps);
+    t.holdRuns();
+    await dispatch(review("changes_requested"), t.deps);
+    await dispatch(review("changes_requested"), t.deps);
+    await dispatch(comment("owner"), t.deps);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(t.runs).toHaveLength(1);
+    expect(t.deps.loop?.get("o/r", 5).codyRuns).toBe(1);
+    expect(t.logs.filter((l) => l.includes("dropped"))).toHaveLength(2);
   });
 });
 

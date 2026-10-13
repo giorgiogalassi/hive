@@ -44,8 +44,14 @@ export function createApp(options: AppOptions): Hono {
     c.req.raw.headers.forEach((v, k) => {
       headers[k] = v;
     });
-    const normalized = options.parser.parseEvent(headers, raw);
-    const event = normalized ? toHiveEvent(normalized) : null;
+    let event: HiveEvent | null;
+    try {
+      const normalized = options.parser.parseEvent(headers, raw);
+      event = normalized ? toHiveEvent(normalized) : null;
+    } catch (err) {
+      log(`[webhook] could not parse verified payload: ${err instanceof Error ? err.message : String(err)}`);
+      return c.json({ status: "ignored" });
+    }
     if (event) {
       // Respond now; the run continues after the response and must never crash the server.
       Promise.resolve()

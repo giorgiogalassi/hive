@@ -291,6 +291,11 @@ Verifies PRD 4 (carried over).
 | 5 | Owner comments again | Cody run starts (counter 3) |
 | 6 | Next `changes_requested` review | `human:review` applied, no run (cap reached; owner comments counted) |
 
+Deviation from Python: the 3-run cap now applies to owner comments too (Python requeued on
+every owner comment without a cap). At the cap, an owner comment applies `human:review` and
+starts no run. Comments posted by Hive itself carry a hidden `<!-- hive:bot -->` marker and
+are ignored by dispatch, so the engine's failure and salvage comments never requeue Cody.
+
 Confirm the owner-comment events counted toward the same cap as reviews (step 6 lands on the
 fourth trigger, not later).
 

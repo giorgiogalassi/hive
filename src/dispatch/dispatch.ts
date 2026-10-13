@@ -2,6 +2,7 @@ import type { AgentConfig } from "../agents/loader.js";
 import { runAgent } from "../engine/engine.js";
 import type { EngineDeps } from "../engine/engine.js";
 import type { RunTarget } from "../engine/types.js";
+import { BOT_MARKER } from "../vcs/port.js";
 import type { VcsPort } from "../vcs/port.js";
 import type { HiveEvent } from "./events.js";
 import { ReworkLoop } from "./loop.js";
@@ -59,16 +60,36 @@ export async function dispatch(event: HiveEvent, deps: DispatchDeps): Promise<Di
     }
   };
 
-  const prTarget = (repo: string, n: number, title: string, body: string, reviewBody = ""): RunTarget => ({
-    kind: "pr",
-    repo,
-    number: n,
-    title,
-    body,
-    headBranch: "",
-    baseBranch: "",
-    reviewBody,
-  });
+  /** Builds a PR target from freshly fetched PR details; empty values (logged) when the fetch fails. */
+  const prTarget = async (repo: string, n: number, reviewBody = ""): Promise<RunTarget> => {
+    let pr = { title: "", body: "", headBranch: "", baseBranch: "" };
+    try {
+      pr = await deps.vcs.getPullRequest(repo, n);
+    } catch (err) {
+      log(`[dispatch] could not fetch PR ${repo}#${n}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return {
+      kind: "pr",
+      repo,
+      number: n,
+      title: pr.title,
+      body: pr.body,
+      headBranch: pr.headBranch,
+      baseBranch: pr.baseBranch,
+      reviewBody,
+    };
+  };
+
+  const isInFlight = (agentName: string, repo: string, n: number): boolean =>
+    (deps.inFlight ?? defaultInFlight).has(`${repo}#${n}#${agentName}`);
+
+  const escalate = async (repo: string, n: number): Promise<void> => {
+    try {
+      await deps.vcs.applyLabel(repo, n, "human:review");
+    } catch (err) {
+      log(`[dispatch] could not apply human:review: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
 
   /** Claims the in-flight key, builds the target, runs the agent; releases the key when the run ends. */
   const start = async (
@@ -133,41 +154,48 @@ export async function dispatch(event: HiveEvent, deps: DispatchDeps): Promise<Di
         log(`[dispatch] debug: unhandled label ${event.label}, ignoring`);
         return ignored;
       }
-      return start("reven", event.repo, event.prNumber, async () => {
-        const d = await details(event.repo, event.prNumber);
-        return prTarget(event.repo, event.prNumber, d.title, d.body);
-      });
+      return start("reven", event.repo, event.prNumber, () => prTarget(event.repo, event.prNumber));
     }
     case "review_submitted": {
+      // A trigger that will be dropped as in-flight must not consume a rework slot.
+      if (event.state === "changes_requested" && isInFlight("cody", event.repo, event.prNumber)) {
+        log(`[dispatch] dropped cody trigger for ${event.repo}#${event.prNumber}: run already in flight`);
+        return ignored;
+      }
       const decision = loop.onReview(event.repo, event.prNumber, event.state);
       if (decision === "human_review") {
-        try {
-          await deps.vcs.applyLabel(event.repo, event.prNumber, "human:review");
-        } catch (err) {
-          log(`[dispatch] could not apply human:review: ${err instanceof Error ? err.message : String(err)}`);
-        }
+        await escalate(event.repo, event.prNumber);
         return ignored;
       }
       if (decision !== "requeue") {
         log(`[dispatch] debug: review ${event.state} on ${event.repo}#${event.prNumber} -> ${decision}`);
         return ignored;
       }
-      return start("cody", event.repo, event.prNumber, async () =>
-        prTarget(event.repo, event.prNumber, "", "", event.body),
-      );
+      return start("cody", event.repo, event.prNumber, () => prTarget(event.repo, event.prNumber, event.body));
     }
     case "pr_comment": {
+      if (event.body.includes(BOT_MARKER)) {
+        log(`[dispatch] debug: ignoring Hive-authored comment on ${event.repo}#${event.prNumber}`);
+        return ignored;
+      }
       if (owner === "" || event.author !== owner) {
         log(`[dispatch] debug: comment author ${event.author} is not the repo owner, ignoring`);
         return ignored;
       }
-      if (loop.onOwnerComment(event.repo, event.prNumber) !== "requeue") {
+      if (isInFlight("cody", event.repo, event.prNumber)) {
+        log(`[dispatch] dropped cody trigger for ${event.repo}#${event.prNumber}: run already in flight`);
+        return ignored;
+      }
+      const decision = loop.onOwnerComment(event.repo, event.prNumber);
+      if (decision === "human_review") {
+        await escalate(event.repo, event.prNumber);
+        return ignored;
+      }
+      if (decision !== "requeue") {
         log(`[dispatch] debug: owner comment on ${event.repo}#${event.prNumber} before first review, ignoring`);
         return ignored;
       }
-      return start("cody", event.repo, event.prNumber, async () =>
-        prTarget(event.repo, event.prNumber, "", "", event.body),
-      );
+      return start("cody", event.repo, event.prNumber, () => prTarget(event.repo, event.prNumber, event.body));
     }
   }
 }

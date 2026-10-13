@@ -68,6 +68,13 @@ export interface PullRequestSummary {
   author: string;
 }
 
+export interface PullRequestDetails extends PullRequestSummary {
+  body: string;
+}
+
+/** Hidden marker appended to every comment Hive posts, so its own comments are never treated as human input. */
+export const BOT_MARKER = "<!-- hive:bot -->";
+
 export interface SubmittedReview {
   id: number;
   state: ReviewState;
@@ -122,6 +129,7 @@ export interface VcsPort {
   /** Sub-issues first, then `Depends-on: #N` body parsing; deduplicated. */
   getIssueDependencies(repo: string, number: number): Promise<number[]>;
   listOpenPullRequests(repo: string): Promise<PullRequestSummary[]>;
+  getPullRequest(repo: string, prNumber: number): Promise<PullRequestDetails>;
   /** Most recent submitted (non-pending, non-dismissed) review on a PR, or null when none. */
   getLatestReview(repo: string, prNumber: number): Promise<SubmittedReview | null>;
 }
