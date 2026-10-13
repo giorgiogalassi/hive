@@ -1,16 +1,22 @@
-# Never bake secrets into the image — supply them at runtime via docker-compose env_file.
+# Never bake secrets into the image; supply them at runtime via docker-compose env_file.
 .env
 
-# Python byte-code and virtual environments are not needed in the image.
+# Dependencies and build output are produced inside the image.
+node_modules/
+dist/
+build/
+
+# Legacy Python tree is not part of the image.
+hive/
+hive_cli.py
+pyproject.toml
 __pycache__/
 *.pyc
 *.pyo
 .venv/
-
-# Build artefacts.
-dist/
-build/
 *.egg-info/
 
-# Editor and OS noise.
+# Repo metadata and editor noise.
+.git/
+.claude/
 .DS_Store
