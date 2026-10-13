@@ -10,23 +10,18 @@ Primary use case: add the label `agent:develop` to a GitHub issue, a remote agen
 
 ## How it works
 
-```
-Label added / comment posted on GitHub
-        |
-Hono webhook receiver (POST /webhook)        hive run --project <label>
-        |  verifies HMAC-SHA256 signature            |
-        +---------------- HiveEvent -----------------+
-                            |
-                  unified dispatch (rework loop, in-flight dedup)
-                            |
-         loads agents/<name>.yaml, clones the repo into a temp workdir
-                            |
-         engine: iteration / resume loop, idle + overall timeouts,
-         checkpoint commits, salvage
-                            |
-         agent runner: claude-code (CLI)  |  claude-agent-sdk
-                            |
-         agent pushes a branch, opens a PR, posts comments via GitHub
+[![Hive flow](docs/flow.png)](https://giorgiogalassi.github.io/hive/flow.html)
+
+The full picture, including the side paths, the failure paths and a matrix
+of which trigger leads to which run, lives in
+[`docs/flow.html`](docs/flow.html), rendered at
+<https://giorgiogalassi.github.io/hive/flow.html>. The spine is:
+
+```mermaid
+graph LR
+    A["agent:develop"] --> B["/webhook"] --> C["dispatch()"] --> D["engine"] --> E["Cody"] --> F["agent:review"] --> G["Reven"] --> H["Merge"]
+    G -.->|changes requested, max 3| E
+    I["hive run --project"] -.-> C
 ```
 
 The webhook and `hive run` share the same dispatch function, so a label behaves identically whichever way it arrives.

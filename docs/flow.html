@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hive Flow</title>
+<meta name="description" content="How a GitHub label reaches a Hive agent: receiver, dispatch, engine, backend, review and rework, with a trigger matrix.">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  html, body { margin: 0; }
+  body { font-size: 14px; }
+  img { max-width: 100%; }
+</style>
+<style>
+  html, body { margin: 0; }
+  body { font-size: 14px; }
+  img { max-width: 100%; }
+</style>
+<style>
+  /* Layout: a horizontal pipeline of step cards, side paths below,
+     then a trigger matrix (which event leads to which run and writes). */
+  :root {
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --ink: #1c2230;
+    --muted: #5d6675;
+    --line: #d7dce4;
+    --accent: #0f766e;
+    --accent-soft: #d9f0ec;
+    --hook: #6d4fc2;
+    --hook-soft: #ebe6fb;
+    --side: #b45309;
+    --side-soft: #fdebd0;
+    --read: #2563eb;
+    --write: #b91c1c;
+    --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12161d; --surface: #1a2029; --ink: #e8ebf0; --muted: #9aa3b2; --line: #2d3542;
+      --accent: #2dd4bf; --accent-soft: #113b37; --hook: #a78bfa; --hook-soft: #2a2347;
+      --side: #f59e0b; --side-soft: #3d2a0a; --read: #60a5fa; --write: #f87171; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12161d; --surface: #1a2029; --ink: #e8ebf0; --muted: #9aa3b2; --line: #2d3542;
+    --accent: #2dd4bf; --accent-soft: #113b37; --hook: #a78bfa; --hook-soft: #2a2347;
+    --side: #f59e0b; --side-soft: #3d2a0a; --read: #60a5fa; --write: #f87171; color-scheme: dark;
+  }
+  body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.45; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding-inline: 20px; padding-block: 32px 48px; }
+  h1 { font-size: 1.6rem; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; text-wrap: balance; }
+  .sub { color: var(--muted); margin: 0 0 24px; max-width: 70ch; }
+  h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; margin: 32px 0 12px; }
+  code, .cmd { font-family: var(--font-mono); font-size: 0.86em; }
+
+  /* pipeline */
+  .pipe { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 22px; align-items: stretch; }
+  .pipe + .pipe { margin-top: 44px; position: relative; }
+  .pipe + .pipe::before { content: "↳ continues"; position: absolute; top: -30px; left: 0; font-size: 0.78rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); }
+  .node.side { border-color: var(--side); background: var(--side-soft); }
+  .node.side .cmd { color: var(--side); }
+  .node.anytime { border-style: dashed; }
+  .node.anytime::before, .node.anytime::after { display: none; }
+  .node { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px 12px; position: relative; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  .node .cmd { color: var(--accent); font-weight: 500; }
+  .node.hook { border-color: var(--hook); background: var(--hook-soft); }
+  .node.hook .cmd { color: var(--hook); }
+  .node.gate { border-style: dashed; }
+  .node h3 { margin: 0; font-size: 0.95rem; font-weight: 600; }
+  .node p { margin: 0; color: var(--muted); font-size: 0.82rem; }
+  .node + .node::before { content: ""; position: absolute; left: -22px; top: calc(50% - 2px); width: 22px; height: 0; border-top: 3px solid var(--accent); }
+  .node + .node::after { content: ""; position: absolute; left: -9px; top: calc(50% - 8px); border: 7px solid transparent; border-left: 9px solid var(--accent); }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: auto; padding-top: 4px; }
+  .chip { font-family: var(--font-mono); font-size: 0.7rem; padding: 1px 6px; border-radius: 3px; border: 1px solid var(--line); color: var(--muted); white-space: normal; overflow-wrap: anywhere; }
+  .chip.r { border-color: var(--read); color: var(--read); }
+  .chip.w { border-color: var(--write); color: var(--write); }
+
+  /* branch row under the pipeline */
+  .branches { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+  .branch { grid-column: span 2; border: 1px solid var(--side); background: var(--side-soft); border-radius: 6px; padding: 10px 12px; font-size: 0.82rem; min-width: 0; }
+  .branch .cmd { color: var(--side); font-weight: 500; }
+  .branch b { display: block; font-weight: 600; margin-bottom: 2px; }
+  .branch p { margin: 0; color: var(--muted); }
+
+  /* legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 14px; font-size: 0.8rem; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--line); background: var(--surface); }
+  .sw.hook { background: var(--hook-soft); border-color: var(--hook); }
+  .sw.side { background: var(--side-soft); border-color: var(--side); }
+
+  /* memory matrix */
+  .matrix-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; min-width: 860px; font-size: 0.82rem; }
+  th, td { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: center; white-space: nowrap; }
+  th { font-weight: 600; color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  td:first-child, th:first-child { text-align: left; font-family: var(--font-mono); font-size: 0.78rem; position: sticky; left: 0; background: var(--surface); }
+  td:nth-child(2), th:nth-child(2) { text-align: left; color: var(--muted); font-family: var(--font-body); font-size: 0.78rem; }
+  tr:last-child td { border-bottom: 0; }
+  .R { color: var(--read); font-weight: 600; font-family: var(--font-mono); }
+  .W { color: var(--write); font-weight: 600; font-family: var(--font-mono); }
+  .RW { font-family: var(--font-mono); font-weight: 600; }
+  .RW .R { margin-right: 2px; }
+  td small { display: block; font-family: var(--font-body); font-weight: 400; font-size: 0.68rem; color: var(--muted); line-height: 1.1; }
+  tbody tr.group td { background: var(--bg); color: var(--muted); font-family: var(--font-body); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; text-align: left; padding-block: 5px; }
+
+  .notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 12px; }
+  .note { border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; background: var(--surface); font-size: 0.84rem; min-width: 0; }
+  .note b { display: block; margin-bottom: 4px; }
+  .note p { margin: 0; color: var(--muted); }
+
+  @media (max-width: 900px) {
+    .pipe, .branches { grid-template-columns: 1fr; gap: 22px; }
+    .node + .node::before { left: calc(50% - 1px); top: -22px; width: 0; height: 22px; border-top: 0; border-left: 3px solid var(--accent); }
+    .node + .node::after { left: calc(50% - 7px); top: -9px; border: 7px solid transparent; border-left: 7px solid transparent; border-top: 9px solid var(--accent); }
+    .branch { grid-column: 1; }
+  }
+  a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+<style>
+  .b-analyze { grid-column: 1 / span 2; }
+  .b-run { grid-column: 3 / span 2; }
+  .b-fail { grid-column: 5 / span 2; }
+  @media (max-width: 900px) { .b-analyze, .b-run, .b-fail { grid-column: 1; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Hive flow</h1>
+  <p class="sub">One issue from label to merge: how a GitHub event reaches an agent, what the engine does around the agent run, and how review and rework loop back. Chips show what each step reads (<span class="R">R</span>) and writes (<span class="W">W</span>) on GitHub or in the workdir; the matrix below maps every trigger to its outcome.</p>
+
+  <h2>Pipeline</h2>
+  <div class="pipe">
+    <div class="node gate">
+      <span class="cmd">you</span>
+      <h3>Label an issue</h3>
+      <p>Apply <code>agent:develop</code> to have Cody implement it. This and <code>agent:analyze</code> are the only labels a human applies.</p>
+      <div class="chips"><span class="chip w">agent:develop</span></div>
+    </div>
+    <div class="node hook">
+      <span class="cmd">POST /webhook</span>
+      <h3>Receiver</h3>
+      <p>Hono on port 8000. Verifies the HMAC-SHA256 signature in constant time; 401 when missing or wrong. Answers 200 at once and continues in the background.</p>
+      <div class="chips"><span class="chip r">GITHUB_WEBHOOK_SECRET</span></div>
+    </div>
+    <div class="node">
+      <span class="cmd">dispatch()</span>
+      <h3>Dispatch</h3>
+      <p>The one entry point for webhook and CLI. Maps the label to an agent and drops a trigger whose run is already in flight.</p>
+      <div class="chips"><span class="chip r">issue</span><span class="chip r">agents/*.yaml</span></div>
+    </div>
+    <div class="node">
+      <span class="cmd">runAgent()</span>
+      <h3>Engine</h3>
+      <p>Clones into a temp workdir, then loops up to <code>max_iterations</code>. At <code>max_turns</code> it checkpoint-commits and resumes the same session; on timeout it commits, then kills.</p>
+      <div class="chips"><span class="chip w">checkpoint commits</span><span class="chip w">run.log</span></div>
+    </div>
+    <div class="node">
+      <span class="cmd">runner: claude-code</span>
+      <h3>Backend</h3>
+      <p>Claude Code CLI with <code>stream-json</code>, normalised to agent events. <code>claude-agent-sdk</code> is the second backend (planned).</p>
+      <div class="chips"><span class="chip r">ANTHROPIC_API_KEY</span></div>
+    </div>
+    <div class="node">
+      <span class="cmd">agent</span>
+      <h3>Cody</h3>
+      <p>Implements the issue on <code>agent/issue-&lt;N&gt;-…</code>, pushes and opens a PR. Partial work is salvaged if the run fails.</p>
+      <div class="chips"><span class="chip w">branch</span><span class="chip w">PR</span></div>
+    </div>
+  </div>
+
+  <div class="pipe">
+    <div class="node hook">
+      <span class="cmd">pull_request opened</span>
+      <h3>Auto-label</h3>
+      <p>Hive applies <code>agent:review</code> to the new PR, only if it is not already there, so a re-delivered webhook adds nothing.</p>
+      <div class="chips"><span class="chip w">agent:review</span></div>
+    </div>
+    <div class="node">
+      <span class="cmd">agent</span>
+      <h3>Reven</h3>
+      <p>Reviews the PR diff and writes <code>review.json</code>; the engine posts it as a GitHub Review. A missing file or failed post means <code>human:review</code>.</p>
+      <div class="chips"><span class="chip r">diff.patch</span><span class="chip w">review</span></div>
+    </div>
+    <div class="node">
+      <span class="cmd">rework loop</span>
+      <h3>Changes requested</h3>
+      <p>Requests changes or an owner comment re-queue Cody with the feedback. Capped at 3 Cody runs per PR, then <code>human:review</code>.</p>
+      <div class="chips"><span class="chip r">review body</span><span class="chip w">Cody run</span></div>
+    </div>
+    <div class="node gate">
+      <span class="cmd">you</span>
+      <h3>Steer with comments</h3>
+      <p>After the first review, a PR comment from <code>GITHUB_OWNER</code> re-queues Cody. Comments Hive posts itself carry a bot marker and are ignored.</p>
+      <div class="chips"><span class="chip w">PR comment</span></div>
+    </div>
+    <div class="node gate">
+      <span class="cmd">you</span>
+      <h3>Merge</h3>
+      <p>An approved review ends the loop. You merge the PR and close the issue; Hive does not close issues itself.</p>
+      <div class="chips"><span class="chip">GitHub</span></div>
+    </div>
+    <div class="node side">
+      <span class="cmd">human:review</span>
+      <h3>Escalation</h3>
+      <p>Applied on the rework cap or an unpostable review. Hive starts no further runs on that PR; inspect the logs.</p>
+      <div class="chips"><span class="chip w">human:review</span></div>
+    </div>
+  </div>
+
+  <div class="branches">
+    <div class="branch b-analyze">
+      <b><span class="cmd">agent:analyze</span> before deciding</b>
+      <p>Runs issue-reviewer instead of Cody. It reads the issue and posts an analysis comment; nothing is branched or pushed.</p>
+    </div>
+    <div class="branch b-run">
+      <b><span class="cmd">hive run --project &lt;label&gt;</span> without a receiver</b>
+      <p>Lists issues with the label, orders them by dependencies (sub-issues, <code>Depends-on: #N</code>), and synthesises the same events into the same dispatch: Cody, wait for the PR, Reven, rework.</p>
+    </div>
+    <div class="branch b-fail">
+      <b>When a run fails</b>
+      <p>No result, an error, a timeout kill or iterations exhausted: the engine pushes the branch as it stands and comments on the issue. Skipped on main/master or when nothing was committed.</p>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><i class="sw"></i> engine step</span>
+    <span><i class="sw hook"></i> GitHub event, handled automatically</span>
+    <span><i class="sw side"></i> side path or escalation</span>
+    <span><i class="sw" style="border-style:dashed"></i> human action</span>
+  </div>
+
+  <h2>Trigger matrix</h2>
+  <div class="matrix-wrap">
+    <table>
+      <thead>
+        <tr><th>trigger</th><th>condition</th><th>webhook</th><th>hive run</th><th>agent</th><th>writes</th><th>then</th></tr>
+      </thead>
+      <tbody>
+        <tr class="group"><td colspan="7">issues</td></tr>
+        <tr><td>agent:develop</td><td>not in flight</td><td class="R">R</td><td class="R">R <small>synthesised</small></td><td>cody</td><td class="W">W <small>branch, PR</small></td><td>PR opened</td></tr>
+        <tr><td>agent:analyze</td><td>not in flight</td><td class="R">R</td><td></td><td>issue-reviewer</td><td class="W">W <small>comment</small></td><td>—</td></tr>
+        <tr class="group"><td colspan="7">pull requests</td></tr>
+        <tr><td>PR opened</td><td>no agent:review yet</td><td class="R">R</td><td></td><td>—</td><td class="W">W <small>agent:review</small></td><td>Reven</td></tr>
+        <tr><td>agent:review</td><td>not in flight</td><td class="R">R</td><td class="R">R <small>synthesised</small></td><td>reven</td><td class="W">W <small>review</small></td><td>review submitted</td></tr>
+        <tr><td>approved</td><td>—</td><td class="R">R</td><td class="R">R</td><td>—</td><td></td><td>merge</td></tr>
+        <tr><td>changes requested</td><td>Cody runs &lt; 3</td><td class="R">R</td><td class="R">R</td><td>cody</td><td class="W">W <small>commits</small></td><td>Reven again</td></tr>
+        <tr><td>changes requested</td><td>Cody runs = 3</td><td class="R">R</td><td class="R">R</td><td>—</td><td class="W">W <small>human:review</small></td><td>stop</td></tr>
+        <tr><td>owner comment</td><td>after first review, no bot marker</td><td class="R">R</td><td></td><td>cody</td><td class="W">W <small>commits</small></td><td>counts toward cap</td></tr>
+        <tr><td>other comment</td><td>non-owner, or before a review</td><td class="R">R</td><td></td><td>—</td><td></td><td>ignored</td></tr>
+        <tr class="group"><td colspan="7">failure paths</td></tr>
+        <tr><td>review not postable</td><td>review.json missing or POST fails</td><td class="R">R</td><td class="R">R</td><td>—</td><td class="W">W <small>human:review</small></td><td>stop</td></tr>
+        <tr><td>run failed</td><td>branch moved, not main/master</td><td class="R">R</td><td class="R">R</td><td>—</td><td class="W">W <small>push, comment</small></td><td>salvaged</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="notes">
+    <div class="note"><b>Reading the cells</b><p>In the webhook and hive run columns, <span class="R">R</span> means that path receives the trigger; "synthesised" means the CLI builds the event itself instead of waiting for GitHub. <span class="W">W</span> lists what Hive or the agent writes to GitHub.</p></div>
+    <div class="note"><b>Credentials</b><p>One <code>GITHUB_TOKEN</code> serves both agents. Exactly one Anthropic credential reaches the agent: <code>ANTHROPIC_API_KEY</code> if set, else <code>CLAUDE_CODE_OAUTH_TOKEN</code>. With a single token GitHub rejects Reven approving Cody's own PR, so expect <code>human:review</code> until agents get separate identities.</p></div>
+    <div class="note"><b>State lives in memory</b><p>The rework counters and in-flight set are per process and reset on restart. Labels on GitHub are the durable status; the workdir and its <code>run.log</code> are deleted after each run.</p></div>
+  </div>
+</div>
+</body>
+</html>
