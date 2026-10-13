@@ -14,3 +14,4 @@ build/
 
 # Editor and OS noise.
 .DS_Store
+node_modules/
