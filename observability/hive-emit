@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Emit one Hive flow event as an OTLP/HTTP log record.
+#
+#   hive-emit <event> key=value [key=value ...]
+#   hive-emit hive.verdict pr=41 verdict=APPROVE round=1 agent=reven
+#
+# Called from agent-squad hooks (SubagentStop, SessionEnd) for what the
+# CLIs do not export: review verdicts, PR outcomes, review rounds, session
+# kind. Never fails the caller: any error exits 0 silently.
+# Env: HIVE_OTLP_ENDPOINT (default http://localhost:4318), HIVE_SESSION_ID.
+set -u
+event="${1:-}"; [ -n "$event" ] || exit 0; shift
+endpoint="${HIVE_OTLP_ENDPOINT:-http://localhost:4318}"
+command -v jq >/dev/null 2>&1 || exit 0
+attrs='[]'
+for kv in "$@"; do
+  k="${kv%%=*}"; v="${kv#*=}"
+  attrs="$(jq -cn --argjson a "$attrs" --arg k "$k" --arg v "$v" '$a + [{key:$k, value:{stringValue:$v}}]')"
+done
+attrs="$(jq -cn --argjson a "$attrs" --arg e "$event" --arg s "${HIVE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}" \
+  '$a + [{key:"event", value:{stringValue:$e}}, {key:"session.id", value:{stringValue:$s}}]')"
+now="$(date +%s)000000000"
+body="$(jq -cn --argjson attrs "$attrs" --arg now "$now" --arg e "$event" '{
+  resourceLogs: [{
+    resource: { attributes: [{key:"service.name", value:{stringValue:"hive"}}] },
+    scopeLogs: [{ scope: {name:"hive-emit"}, logRecords: [{
+      timeUnixNano: $now, severityText: "INFO", body: {stringValue: $e}, attributes: $attrs
+    }] }]
+  }]
+}')"
+curl -sS -m 3 -o /dev/null -X POST "$endpoint/v1/logs" -H 'Content-Type: application/json' --data "$body" 2>/dev/null || true
+exit 0

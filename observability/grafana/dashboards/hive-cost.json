@@ -1,0 +1,41 @@
+{
+  "title": "Hive: cost and tokens",
+  "uid": "hive-cost",
+  "schemaVersion": 39,
+  "time": { "from": "now-28d", "to": "now" },
+  "panels": [
+    {
+      "type": "timeseries", "title": "Cost per day by provider (USD, list price)",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [ { "expr": "sum by (hive_provider) (increase(claude_code_cost_usage_USD_total[1d]))" } ]
+    },
+    {
+      "type": "timeseries", "title": "Tokens per day by type",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [ { "expr": "sum by (type) (increase(claude_code_token_usage_tokens_total[1d]))" } ]
+    },
+    {
+      "type": "stat", "title": "Cache hit ratio (28d)",
+      "gridPos": { "x": 0, "y": 8, "w": 6, "h": 5 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [ { "expr": "sum(increase(claude_code_token_usage_tokens_total{type=\"cacheRead\"}[28d])) / sum(increase(claude_code_token_usage_tokens_total{type=~\"input|cacheRead|cacheCreation\"}[28d]))" } ]
+    },
+    {
+      "type": "stat", "title": "Sessions (28d)",
+      "gridPos": { "x": 6, "y": 8, "w": 6, "h": 5 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [ { "expr": "sum(increase(claude_code_session_count_total[28d]))" } ]
+    },
+    {
+      "type": "stat", "title": "Cost per session: last 28d vs previous 28d",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 5 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [
+        { "refId": "now", "expr": "sum(increase(claude_code_cost_usage_USD_total[28d])) / sum(increase(claude_code_session_count_total[28d]))" },
+        { "refId": "prev", "expr": "sum(increase(claude_code_cost_usage_USD_total[28d] offset 28d)) / sum(increase(claude_code_session_count_total[28d] offset 28d))" }
+      ]
+    }
+  ]
+}

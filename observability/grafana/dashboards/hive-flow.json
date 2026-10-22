@@ -1,0 +1,26 @@
+{
+  "title": "Hive: flow events",
+  "uid": "hive-flow",
+  "schemaVersion": 39,
+  "time": { "from": "now-28d", "to": "now" },
+  "panels": [
+    {
+      "type": "timeseries", "title": "Review verdicts per day (hive.verdict events)",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "uid": "loki" },
+      "targets": [ { "expr": "sum by (verdict) (count_over_time({service_name=\"hive\"} | json | event=\"hive.verdict\" [1d]))" } ]
+    },
+    {
+      "type": "timeseries", "title": "Tool decisions by source (accept vs reject)",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "uid": "loki" },
+      "targets": [ { "expr": "sum by (decision, source) (count_over_time({service_name=\"claude-code\"} | json | event_name=\"tool_decision\" [1d]))" } ]
+    },
+    {
+      "type": "logs", "title": "Hive events (raw)",
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 10 },
+      "datasource": { "uid": "loki" },
+      "targets": [ { "expr": "{service_name=\"hive\"}" } ]
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+# One pipeline per signal. The transform step is where provider schemas
+# (claude_code.*, codex.*) get a common `hive.*` vocabulary; today it only
+# tags the provider so dashboards can split by it.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 256
+  # Provider tag, derived from the service.name each CLI sets.
+  transform/provider:
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["hive.provider"], "claude-code") where attributes["service.name"] == "claude-code"
+          - set(attributes["hive.provider"], "codex") where IsMatch(attributes["service.name"], "^codex")
+    log_statements:
+      - context: resource
+        statements:
+          - set(attributes["hive.provider"], "claude-code") where attributes["service.name"] == "claude-code"
+          - set(attributes["hive.provider"], "codex") where IsMatch(attributes["service.name"], "^codex")
+          - set(attributes["hive.provider"], "hive") where attributes["service.name"] == "hive"
+
+exporters:
+  otlphttp/prometheus:
+    endpoint: http://prometheus:9090/api/v1/otlp
+    tls:
+      insecure: true
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/provider, batch]
+      exporters: [otlphttp/prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/provider, batch]
+      exporters: [otlphttp/loki]

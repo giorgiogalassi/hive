@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 60s
+# Metrics arrive through the OTLP receiver (--web.enable-otlp-receiver);
+# no scrape targets are needed for the agent CLIs.
+otlp:
+  # Keep every resource attribute as a label so dashboards can split by
+  # user, session, model, provider.
+  promote_resource_attributes:
+    - service.name
+    - service.version
+    - hive.provider
+    - user.id
+    - session.id
+    - organization.id
+scrape_configs: []
