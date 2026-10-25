@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 60s
+# Metrics arrive through the OTLP receiver (--web.enable-otlp-receiver);
+# no scrape targets are needed for the agent CLIs.
+otlp:
+  # Promote only low-cardinality resource attributes to labels. Never
+  # session.id: one series per session kills Prometheus at team scale.
+  # Per-session detail lives in Loki as structured metadata.
+  promote_resource_attributes:
+    - service.name
+    - service.version
+    - hive.provider
+    - user.id
+    - organization.id
+scrape_configs: []

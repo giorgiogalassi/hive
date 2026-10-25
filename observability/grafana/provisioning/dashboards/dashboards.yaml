@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: hive
+    folder: Hive
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards
