@@ -81,6 +81,14 @@ check the exact names in Prometheus at <http://localhost:9090> after the
 first session and adjust the panels: they were written from the docs,
 not against live data.
 
+## Cardinality rule
+
+`session.id` is never a Prometheus label (see `prometheus.yml`): one series
+per session is the classic way to kill a Prometheus once more than one
+person exports. Per-session detail is a Loki question (`session.id` is kept
+there as structured metadata). The same rule applies to any attribute with
+one value per session or per run.
+
 ## Not in v0
 
 - Codex cost table; trace pipeline (Codex exports traces, Claude Code does not).

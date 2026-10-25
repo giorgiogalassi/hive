@@ -3,13 +3,13 @@ global:
 # Metrics arrive through the OTLP receiver (--web.enable-otlp-receiver);
 # no scrape targets are needed for the agent CLIs.
 otlp:
-  # Keep every resource attribute as a label so dashboards can split by
-  # user, session, model, provider.
+  # Promote only low-cardinality resource attributes to labels. Never
+  # session.id: one series per session kills Prometheus at team scale.
+  # Per-session detail lives in Loki as structured metadata.
   promote_resource_attributes:
     - service.name
     - service.version
     - hive.provider
     - user.id
-    - session.id
     - organization.id
 scrape_configs: []
