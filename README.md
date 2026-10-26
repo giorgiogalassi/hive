@@ -4,7 +4,7 @@ A personal tool to run AI coding agents against GitHub issues and PRs, triggered
 
 Primary use case: add the label `agent:develop` to a GitHub issue, a remote agent reads it, implements the change and opens a PR for review.
 
-> Status: the TypeScript rewrite is the documented path. The Python package under `hive/` still exists in the tree but is neither documented nor containerised any more. Nothing in this README has been verified end-to-end yet; real webhook and `hive run` runs against GitHub, and the Docker image, are pending a human check.
+> Status: the TypeScript rewrite is the documented path. The last Python implementation is preserved at the `v0.1-python` git tag. Nothing in this README has been verified end-to-end yet; real webhook and `hive run` runs against GitHub, and the Docker image, are pending a human check.
 
 ---
 
@@ -43,7 +43,6 @@ src/
   workspace/    git workspace (clone, branch, checkpoint, salvage)
 agents/         agent YAML definitions (authoritative)
 Dockerfile  docker-compose.yml  .env.example
-hive/           legacy Python implementation (not documented, not containerised)
 ```
 
 ---
@@ -56,8 +55,6 @@ hive/           legacy Python implementation (not documented, not containerised)
 - A GitHub repo with webhook access and a token (see Environment variables)
 - An Anthropic credential (see Credentials)
 - Docker + Docker Compose, only if you run the receiver in a container
-
-Python is not required.
 
 ---
 

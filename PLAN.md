@@ -24,12 +24,12 @@ by the remote agents.
 
 | Layer | Technology | Rationale |
 |---|---|---|
-| Webhook receiver | FastAPI (Python) | Lightweight, async, good for learning |
+| Webhook receiver | Hono (TypeScript) | Lightweight, async, good for learning |
 | Agent runtime | Anthropic SDK + LiteLLM | Direct SDK + provider abstraction |
 | Provider abstraction | LiteLLM | Normalizes tool calls across Anthropic/OpenAI/Ollama |
 | Agent config | Custom declarative YAML | Versionable, readable, not tied to any framework |
 | Containerization | Docker + Docker Compose | Full portability, deploy anywhere |
-| Deploy CLI | `hive` (minimal Python script) | Commands: deploy, list, remove, run |
+| Deploy CLI | `hive` (TypeScript CLI) | Commands: deploy, list, remove, run |
 | Local dev tunnel | localtunnel (current) / ngrok / Cloudflare Tunnel | Local testing without external infrastructure. Using localtunnel (`npx localtunnel --port 8000`) — no account needed. Downside: URL changes on restart, requires updating the GitHub webhook. Migrate to a stable URL in Phase 5. |
 | Hosting (future) | Hetzner VPS + Cloudflare DNS | ~6 EUR/month, fixed IP, zero vendor lock-in |
 | GitHub auth | PAT with limited scopes (then GitHub App) | Separate identity for the agent |
@@ -50,28 +50,14 @@ Restriction to be added after the first working agent.
 ## Project Structure
 
 ```text
-hive/
-  agents/                     agent YAML definitions
-    issue-reviewer.yaml
-    issue-developer.yaml
-  skills/                     Python skills (tool definitions) — empty for now
-  runner/                     system core
-    main.py                   FastAPI app + webhook receiver
-    agent_runner.py           loads YAML, instantiates agent, starts run
-    llm_port.py               LLMPort (abstract interface)
-    adapters/
-      anthropic_adapter.py
-      openai_adapter.py
-      ollama_adapter.py       (future)
-    tools/
-      bash_tool.py
-      read_tool.py
-      write_tool.py
-  hive                        minimal CLI (Python script)
-  docker-compose.yml
-  Dockerfile
-  .env.example                environment variable template
-  README.md
+src/                          TypeScript engine, CLI, webhook receiver
+agents/                       agent YAML definitions
+skills/                       skills (tool definitions) - empty for now
+tests/                        Vitest suites
+docker-compose.yml
+Dockerfile
+.env.example                  environment variable template
+README.md
 ```
 
 ### Agent YAML format
@@ -106,7 +92,7 @@ Goal: receive a GitHub webhook, log it, respond 200.
 No agent yet. Just the network round-trip.
 
 Deliverables:
-- FastAPI app with `/webhook` endpoint
+- Hono app with `/webhook` endpoint
 - HMAC signature verification (basic security)
 - Incoming payload logging
 - Docker Compose running everything locally
@@ -127,7 +113,7 @@ Flow:
 ```
 Label "agent:review" added
         ↓
-FastAPI receives webhook, extracts issue number + label
+Hono receiver gets the webhook, extracts issue number + label
         ↓
 Loads agents/issue-reviewer.yaml
         ↓
@@ -225,7 +211,7 @@ hive run --project my-feature
 
 #### Agent integration
 
-Cody and Reven system prompts live directly in their deploy YAMLs inside `hive/agents/`.
+Cody and Reven system prompts live directly in their deploy YAMLs inside `agents/`.
 They are copied from agent-squad at migration time. Agent-squad remains the source
 for interactive CLI use; Hive owns the deployed versions. Prompts may diverge over time
 as autonomous and interactive use cases differ — that's expected and fine.
@@ -320,7 +306,7 @@ claude/agents/cody.md
         ↓
 Copy system_prompt
         ↓
-hive/agents/cody.yaml  (owns it from here)
+agents/cody.yaml  (owns it from here)
 ```
 
 ### Squad flow with Hive
@@ -448,9 +434,9 @@ agent runs remotely, PR opens.
 
 ## Engine track (TypeScript rewrite)
 
-The Python implementation described in the phases above is being replaced by a TypeScript codebase (webhook receiver, CLI, rework loop, VCS port, engine). Decisions and rationale live in the PRD (`prd/archive/current-20261013-092744.md` in the project vault) and the project `decisions.md`; this section only points at them.
+The Python implementation described in the phases above is being replaced by a TypeScript codebase (webhook receiver, CLI, rework loop, VCS port, engine); the Python tree is deleted and kept only at the `v0.1-python` tag. Decisions and rationale live in the PRD (`prd/archive/current-20261013-092744.md` in the project vault) and the project `decisions.md`; this section only points at them.
 
 - **Seams:** `WorkspacePort` (clone, branch, checkpoint commit, salvage) and `AgentSession` (one agent invocation: prompt in, normalized event stream plus session id out). The engine owns the iteration/resume loop, idle and overall timeouts, and the `max_turns` -> checkpoint -> resume sequence; dispatch, the rework loop and the entry points never call a backend or git directly.
 - **Backends:** `runner: claude-code` (Claude Code CLI shell-out, stream-json; port of the Python path) and `runner: claude-agent-sdk` (Claude Agent SDK, which itself wraps a Claude Code subprocess). Codex is dropped. Credential rule: `ANTHROPIC_API_KEY` wins, `CLAUDE_CODE_OAUTH_TOKEN` is a personal-use fallback.
-- **Sequencing:** (1) dispatch unification, (2) TypeScript codebase with only the CLI backend, (3) failure-path checklist (`docs/failure-path-checklist.md`) walked against the CLI backend, (4) SDK backend, (5) checklist walked against the SDK backend, (6) Python deletion after tagging the last Python commit. The SDK backend must not land before step 3 passes.
-- **Container and docs:** Docker and the README target the TypeScript receiver; `hive/` stays in the tree until step 6. Real end-to-end runs (webhook to PR to review, `hive run`) and the Docker image check are pending human verification.
+- **Sequencing:** (1) dispatch unification, (2) TypeScript codebase with only the CLI backend, (3) failure-path checklist (`docs/failure-path-checklist.md`) walked against the CLI backend, (4) SDK backend, (5) checklist walked against the SDK backend, (6) Python deletion after tagging the last Python commit (done: tag `v0.1-python`). The SDK backend must not land before step 3 passes.
+- **Container and docs:** Docker and the README target the TypeScript receiver. The Python tree was removed in step 6; it remains reachable at the `v0.1-python` tag. Real end-to-end runs (webhook to PR to review, `hive run`) and the Docker image check are pending human verification.

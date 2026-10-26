@@ -6,13 +6,7 @@ node_modules/
 dist/
 build/
 
-# Legacy Python tree is not part of the image.
-hive/
-hive_cli.py
-pyproject.toml
-__pycache__/
-*.pyc
-*.pyo
+
 .venv/
 *.egg-info/
 
