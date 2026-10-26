@@ -1,1 +1,0 @@
-# hive — Autonomous agent orchestrator.

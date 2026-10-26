@@ -5,10 +5,10 @@ deferred for this track, so this document is the compensating control. It gates:
 
 - HV-22: walk against `runner: claude-code`
 - HV-24: walk against `runner: claude-agent-sdk`
-- HV-25: deletion of the Python tree (only after both columns have no failures)
+- HV-25: deletion of the Python tree (done; the reference lives at the `v0.1-python` tag)
 
-Behavioural reference is the Python runner (`hive/runner/agent_runner.py`, `hive/runner/loop.py`,
-`hive/runner/main.py`) until HV-25. Where the TypeScript engine is specified to differ from
+Behavioural reference is the Python runner at git tag `v0.1-python` (`hive/runner/agent_runner.py`, `hive/runner/loop.py`,
+`hive/runner/main.py`) (`git show v0.1-python:<path>`). Where the TypeScript engine is specified to differ from
 Python, the scenario says so; the specification wins over Python in those cases.
 
 ## PRD acceptance criteria covered
